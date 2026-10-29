@@ -16,10 +16,11 @@
 先启动 MySQL 8。Windows PowerShell 示例（按本机安装位置使用 `mysql` 命令）：
 
 ```powershell
-mysql -u root -p < backend/src/main/resources/db/schema.sql
+mysql --default-character-set=utf8mb4 -u root -p < backend/src/main/resources/db/schema.sql
+mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/demo-data.sql
 ```
 
-输入 MySQL root 密码后，脚本会创建 `lab_manage` 数据库、13 张业务表及少量演示数据。脚本适用于首次初始化；它包含初始数据 INSERT，不要直接对已有业务库重复执行，否则可能因唯一键冲突失败。时间字段使用 UTC 语义的 MySQL `DATETIME`，应用 Jackson 时区也设为 UTC；前端预约时间按 UTC ISO 字符串提交。
+输入 MySQL root 密码后，第一个脚本创建 `lab_manage` 数据库、13 张业务表及基础演示数据；第二个脚本按设备编号去重，可重复执行，用于补充更多设备档案。基础脚本适用于首次初始化，不要直接对已有业务库重复执行。时间字段使用 UTC 语义的 MySQL `DATETIME`，前端预约时间按 UTC 提交，开放时间按 `Asia/Shanghai` 转换后校验。
 
 ## 配置与启动
 
@@ -33,6 +34,7 @@ $env:DB_URL='jdbc:mysql://localhost:3306/lab_manage?useUnicode=true&characterEnc
 $env:DB_USERNAME='root'
 $env:DB_PASSWORD='<本机 MySQL 密码>'
 $env:JWT_SECRET='<至少 32 字节的随机密钥>'
+$env:UPLOAD_DIR='uploads'
 mvn -s maven-settings.xml test
 mvn -s maven-settings.xml package -DskipTests
 java -jar target/lab-equipment-system-1.0.0.jar
@@ -72,7 +74,7 @@ npm audit --omit=dev
 - 登录、退出、当前用户：`/api/auth/login`、`/api/auth/logout`、`/api/auth/me`。
 - 设备和基础选项：`/api/equipment`、`/api/equipment/{id}`、`/api/labs`、`/api/categories`。
 - 预约：`/api/reservations` 及其审批、取消动作。
-- 报修和处理：`/api/repairs`、`/api/repairs/{id}`、`/api/repairs/{id}/process`。
+- 报修和处理：`/api/repairs`、`/api/repairs/{id}`、`/api/repairs/{id}/process`；故障图片通过 `/api/uploads/repair-image` 上传并保存到 `UPLOAD_DIR`。
 - 管理用户、实验室、分类：`/api/admin/**`；仅系统管理员可用。
 - 管理统计：`/api/stats`；实验室管理员仅统计授权实验室。
 - OpenAPI JSON：<http://localhost:8080/v3/api-docs>；Swagger UI：<http://localhost:8080/swagger-ui.html>。

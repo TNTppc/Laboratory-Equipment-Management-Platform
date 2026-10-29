@@ -14,6 +14,7 @@ import cn.labmanage.security.AccessService;
 
 @RestController @RequestMapping("/api/reservations")
 public class ReservationController {
+    private static final ZoneId LABORATORY_ZONE = ZoneId.of("Asia/Shanghai");
     private final JdbcTemplate db; private final AccessService access;
     public ReservationController(JdbcTemplate db, AccessService access) { this.db=db; this.access=access; }
     public record Booking(@NotNull Long equipmentId,@NotNull LocalDateTime startsAt,@NotNull LocalDateTime endsAt,@NotBlank String purpose,@Min(1) int participants) {}
@@ -22,7 +23,7 @@ public class ReservationController {
         var eq=db.queryForList("SELECT e.status,l.open_time,l.close_time FROM equipment e JOIN laboratory l ON l.id=e.lab_id WHERE e.id=?",b.equipmentId());
         if(eq.isEmpty()) throw new BusinessException("设备不存在"); var item=eq.get(0);
         LocalTime open=((java.sql.Time)item.get("open_time")).toLocalTime(), close=((java.sql.Time)item.get("close_time")).toLocalTime();
-        try { ReservationRules.validate(b.startsAt(),b.endsAt(),LocalDateTime.now(ZoneOffset.UTC),open,close,(String)item.get("status")); }
+        try { ReservationRules.validateUtc(b.startsAt(),b.endsAt(),LocalDateTime.now(ZoneOffset.UTC),open,close,(String)item.get("status"),LABORATORY_ZONE); }
         catch (IllegalArgumentException e) { throw new BusinessException(e.getMessage()); }
         Integer count=db.queryForObject("SELECT COUNT(*) FROM reservation WHERE equipment_id=? AND status IN ('PENDING','APPROVED') AND starts_at < ? AND ends_at > ? AND (? IS NULL OR id<>?)",Integer.class,b.equipmentId(),b.endsAt(),b.startsAt(),excludeReservationId,excludeReservationId);
         if(count!=null&&count>0) throw new BusinessException("该设备在所选时间段已被预约");

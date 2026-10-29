@@ -10,16 +10,21 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 import java.math.BigDecimal;
 import java.util.Map;
+import java.util.Set;
 import cn.labmanage.security.AccessService;
 
 @RestController @RequestMapping("/api/repairs")
 public class RepairController {
+    private static final Set<String> FAULT_TYPES = Set.of("无法开机","运行异常","测量不准","部件损坏","网络或软件故障","安全隐患","其他");
     private final JdbcTemplate db; private final AccessService access;
     public RepairController(JdbcTemplate db, AccessService access) { this.db=db; this.access=access; }
     public record Report(@NotBlank String faultType,@NotBlank String description,String imageUrls) {}
     @PostMapping("/equipment/{equipmentId}") @Transactional public ApiResult<?> report(@PathVariable long equipmentId,@Valid @RequestBody Report r,Authentication auth) {
+        if(equipmentId<=0) throw new BusinessException("请选择报修设备");
+        if(!FAULT_TYPES.contains(r.faultType())) throw new BusinessException("请选择有效的故障类型");
         Long uid=db.queryForObject("SELECT id FROM lab_user WHERE username=?",Long.class,auth.getName());
-        db.queryForObject("SELECT id FROM equipment WHERE id=? FOR UPDATE",Long.class,equipmentId);
+        var equipment=db.queryForList("SELECT id FROM equipment WHERE id=? FOR UPDATE",equipmentId);
+        if(equipment.isEmpty()) throw new BusinessException("请选择有效的报修设备");
         db.update("INSERT INTO repair_ticket(equipment_id,reporter_id,fault_type,description,image_urls) VALUES(?,?,?,?,?)",equipmentId,uid,r.faultType(),r.description(),r.imageUrls());
         db.update("UPDATE equipment SET status='MAINTENANCE' WHERE id=?",equipmentId);
         db.update("INSERT INTO notification(user_id,title,content) SELECT ur.user_id,'新设备报修',? FROM user_role ur JOIN role r ON r.id=ur.role_id WHERE r.code IN ('LAB_ADMIN','SYS_ADMIN')",r.description());

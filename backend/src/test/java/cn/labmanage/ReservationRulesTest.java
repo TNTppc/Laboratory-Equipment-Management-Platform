@@ -4,6 +4,7 @@ import cn.labmanage.reservation.ReservationRules;
 import org.junit.jupiter.api.Test;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.ZoneId;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ReservationRulesTest {
@@ -31,5 +32,12 @@ class ReservationRulesTest {
     @Test void acceptsValidBooking() {
         LocalDateTime start = LocalDateTime.of(2026, 10, 29, 9, 0);
         assertDoesNotThrow(() -> ReservationRules.validate(start, start.plusHours(1), now, LocalTime.of(8,0), LocalTime.of(22,0), "AVAILABLE"));
+    }
+
+    @Test void validatesOpeningHoursInLaboratoryTimeZone() {
+        LocalDateTime startUtc = LocalDateTime.of(2026, 10, 29, 3, 49);
+        LocalDateTime endUtc = LocalDateTime.of(2026, 10, 29, 4, 49);
+        assertDoesNotThrow(() -> ReservationRules.validateUtc(startUtc, endUtc, now, LocalTime.of(8,0), LocalTime.of(22,0), "AVAILABLE", ZoneId.of("Asia/Shanghai")));
+        assertThrows(IllegalArgumentException.class, () -> ReservationRules.validateUtc(startUtc.minusHours(5), endUtc.minusHours(5), now.minusDays(1), LocalTime.of(8,0), LocalTime.of(22,0), "AVAILABLE", ZoneId.of("Asia/Shanghai")));
     }
 }
