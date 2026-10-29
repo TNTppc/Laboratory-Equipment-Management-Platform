@@ -14,8 +14,14 @@ public class AccessService {
         return auth.getAuthorities().stream().anyMatch(a -> a.getAuthority().equals("ROLE_SYS_ADMIN"));
     }
 
+    public boolean isReadOnlyAdmin(Authentication auth) {
+        return auth.getAuthorities().stream().anyMatch(a -> a.getAuthority().equals("ROLE_READ_ONLY_ADMIN"));
+    }
+
+    public boolean isGlobalViewer(Authentication auth) { return isSystemAdmin(auth) || isReadOnlyAdmin(auth); }
+
     public void requireLab(Authentication auth, long labId) {
-        if (isSystemAdmin(auth)) return;
+        if (isGlobalViewer(auth)) return;
         Integer count = db.queryForObject("SELECT COUNT(*) FROM lab_admin_lab al JOIN lab_user u ON u.id=al.user_id WHERE u.username=? AND al.lab_id=?", Integer.class, auth.getName(), labId);
         if (count == null || count == 0) throw new BusinessException("无权操作该实验室的数据");
     }

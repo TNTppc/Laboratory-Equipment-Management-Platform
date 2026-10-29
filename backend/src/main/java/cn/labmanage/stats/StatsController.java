@@ -8,14 +8,14 @@ import org.springframework.web.bind.annotation.*;
 import java.util.Map;
 import cn.labmanage.security.AccessService;
 
-@RestController @RequestMapping("/api/stats") @PreAuthorize("hasAnyRole('LAB_ADMIN','SYS_ADMIN')")
+@RestController @RequestMapping("/api/stats") @PreAuthorize("hasAnyRole('LAB_ADMIN','SYS_ADMIN','READ_ONLY_ADMIN')")
 public class StatsController {
     private final JdbcTemplate db; private final AccessService access;
     public StatsController(JdbcTemplate db, AccessService access) { this.db=db; this.access=access; }
     @GetMapping public ApiResult<?> summary(Authentication auth) {
         db.update("UPDATE reservation SET status='COMPLETED' WHERE status='APPROVED' AND ends_at<=UTC_TIMESTAMP()");
-        String scope=access.isSystemAdmin(auth)?"":" WHERE EXISTS(SELECT 1 FROM lab_admin_lab al JOIN lab_user au ON au.id=al.user_id WHERE al.lab_id=e.lab_id AND au.username=?)";
-        Object[] args=access.isSystemAdmin(auth)?new Object[]{}:new Object[]{auth.getName()};
+        String scope=access.isGlobalViewer(auth)?"":" WHERE EXISTS(SELECT 1 FROM lab_admin_lab al JOIN lab_user au ON au.id=al.user_id WHERE al.lab_id=e.lab_id AND au.username=?)";
+        Object[] args=access.isGlobalViewer(auth)?new Object[]{}:new Object[]{auth.getName()};
         var equipment=db.queryForMap("SELECT COUNT(*) total,COALESCE(SUM(e.status='AVAILABLE'),0) available,COALESCE(SUM(e.status='MAINTENANCE'),0) maintenance FROM equipment e"+scope,args);
         String reservationWhere=scope.replace(" WHERE "," WHERE r.equipment_id=e.id AND ");
         var bookings=db.queryForMap("SELECT COUNT(*) total,COALESCE(SUM(r.status='APPROVED'),0) approved,COALESCE(SUM(r.status IN ('APPROVED','REJECTED')),0) reviewed FROM reservation r JOIN equipment e ON e.id=r.equipment_id"+scope,args);

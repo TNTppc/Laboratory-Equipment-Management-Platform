@@ -21,4 +21,10 @@ class AccessServiceTest {
         AccessService service=new AccessService(db); var auth=new UsernamePasswordAuthenticationToken("labadmin",null,List.of(new SimpleGrantedAuthority("ROLE_LAB_ADMIN")));
         assertThrows(BusinessException.class,() -> service.requireLab(auth,2));
     }
+    @Test void readOnlyAdminIsRecognizedAsGlobalViewer() {
+        AccessService service=new AccessService(mock(JdbcTemplate.class));
+        var auth=new UsernamePasswordAuthenticationToken("readonly",null,List.of(new SimpleGrantedAuthority("ROLE_READ_ONLY_ADMIN")));
+        assertTrue(service.isReadOnlyAdmin(auth));
+        assertTrue(service.isGlobalViewer(auth));
+    }
 }

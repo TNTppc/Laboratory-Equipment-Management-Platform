@@ -40,4 +40,21 @@ class ReservationRulesTest {
         assertDoesNotThrow(() -> ReservationRules.validateUtc(startUtc, endUtc, now, LocalTime.of(8,0), LocalTime.of(22,0), "AVAILABLE", ZoneId.of("Asia/Shanghai")));
         assertThrows(IllegalArgumentException.class, () -> ReservationRules.validateUtc(startUtc.minusHours(5), endUtc.minusHours(5), now.minusDays(1), LocalTime.of(8,0), LocalTime.of(22,0), "AVAILABLE", ZoneId.of("Asia/Shanghai")));
     }
+
+    @Test void enforcesBookingWindowFromTomorrowThroughSevenDays() {
+        LocalDateTime nowUtc = LocalDateTime.of(2026, 10, 28, 0, 0);
+        ZoneId labZone = ZoneId.of("Asia/Shanghai");
+        LocalDateTime tomorrowStart = LocalDateTime.of(2026, 10, 28, 1, 0);
+        assertThrows(IllegalArgumentException.class, () -> ReservationRules.validateUtc(tomorrowStart, tomorrowStart.plusHours(1), nowUtc, LocalTime.of(8, 0), LocalTime.of(22, 0), "AVAILABLE", labZone));
+        LocalDateTime daySevenStart = LocalDateTime.of(2026, 11, 4, 1, 0);
+        assertDoesNotThrow(() -> ReservationRules.validateUtc(daySevenStart, daySevenStart.plusHours(1), nowUtc, LocalTime.of(8, 0), LocalTime.of(22, 0), "AVAILABLE", labZone));
+        LocalDateTime dayEightStart = daySevenStart.plusDays(1);
+        assertThrows(IllegalArgumentException.class, () -> ReservationRules.validateUtc(dayEightStart, dayEightStart.plusHours(1), nowUtc, LocalTime.of(8, 0), LocalTime.of(22, 0), "AVAILABLE", labZone));
+    }
+
+    @Test void approvalRechecksAvailabilityWithoutReapplyingSubmissionLeadTime() {
+        LocalDateTime nowUtc = LocalDateTime.of(2026, 10, 29, 1, 0);
+        LocalDateTime startsUtc = LocalDateTime.of(2026, 10, 29, 5, 0);
+        assertDoesNotThrow(() -> ReservationRules.validateUtc(startsUtc, startsUtc.plusHours(1), nowUtc, LocalTime.of(8, 0), LocalTime.of(22, 0), "AVAILABLE", ZoneId.of("Asia/Shanghai"), false));
+    }
 }

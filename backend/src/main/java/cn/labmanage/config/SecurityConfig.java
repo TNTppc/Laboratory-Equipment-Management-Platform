@@ -18,7 +18,7 @@ import jakarta.servlet.http.HttpServletResponse;
 public class SecurityConfig {
     @Bean SecurityFilterChain filterChain(HttpSecurity http, JwtFilter jwt) throws Exception {
         return http.csrf(c -> c.disable()).cors(Customizer.withDefaults()).sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-            .authorizeHttpRequests(a -> a.requestMatchers("/api/auth/login", "/uploads/**", "/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll().anyRequest().authenticated())
+            .authorizeHttpRequests(a -> a.requestMatchers("/api/auth/login", "/api/auth/register", "/uploads/**", "/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll().anyRequest().authenticated())
             .exceptionHandling(e -> e.authenticationEntryPoint((req,res,ex) -> jsonError(res,401,"请先登录")).accessDeniedHandler((req,res,ex) -> jsonError(res,403,"无权执行该操作")))
             .addFilterBefore(jwt, UsernamePasswordAuthenticationFilter.class).build();
     }

@@ -9,5 +9,6 @@ export const api = {
   get<T = any>(url: string, config?: AxiosRequestConfig): Promise<T> { return client.get(url, config) as unknown as Promise<T> },
   post<T = any>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> { return client.post(url, data, config) as unknown as Promise<T> },
   put<T = any>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> { return client.put(url, data, config) as unknown as Promise<T> },
+  delete<T = any>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> { return client.delete(url, { ...config, data }) as unknown as Promise<T> },
   upload<T = any>(url: string, file: File): Promise<T> { const data = new FormData(); data.append('file', file); return client.post(url, data) as unknown as Promise<T> }
 }
