@@ -26,9 +26,10 @@ public class RepairController {
         var equipment=db.queryForList("SELECT id FROM equipment WHERE id=? FOR UPDATE",equipmentId);
         if(equipment.isEmpty()) throw new BusinessException("请选择有效的报修设备");
         db.update("INSERT INTO repair_ticket(equipment_id,reporter_id,fault_type,description,image_urls) VALUES(?,?,?,?,?)",equipmentId,uid,r.faultType(),r.description(),r.imageUrls());
+        Long ticketId=db.queryForObject("SELECT LAST_INSERT_ID()",Long.class);
         db.update("UPDATE equipment SET status='MAINTENANCE' WHERE id=?",equipmentId);
-        db.update("INSERT INTO notification(user_id,title,content) SELECT ur.user_id,'新设备报修',? FROM user_role ur JOIN role r ON r.id=ur.role_id WHERE r.code IN ('LAB_ADMIN','SYS_ADMIN')",r.description());
-        return ApiResult.ok(Map.of("id",db.queryForObject("SELECT LAST_INSERT_ID()",Long.class)));
+        db.update("INSERT INTO notification(user_id,title,content) SELECT DISTINCT ur.user_id,'新设备报修',CONCAT('用户【',reporter.real_name,'】对设备【',e.code,' ',e.name,'】（',l.name,'）提交了报修。故障类型：',?,'；故障描述：',?) FROM user_role ur JOIN role role ON role.id=ur.role_id JOIN lab_user reporter ON reporter.id=? JOIN equipment e ON e.id=? JOIN laboratory l ON l.id=e.lab_id LEFT JOIN lab_admin_lab al ON al.user_id=ur.user_id AND al.lab_id=e.lab_id WHERE role.code='SYS_ADMIN' OR (role.code='LAB_ADMIN' AND al.lab_id IS NOT NULL)",r.faultType(),r.description(),uid,equipmentId);
+        return ApiResult.ok(Map.of("id",ticketId));
     }
     @GetMapping public ApiResult<?> list(Authentication auth) {
         boolean manager=auth.getAuthorities().stream().anyMatch(a->a.getAuthority().equals("ROLE_LAB_ADMIN")||a.getAuthority().equals("ROLE_SYS_ADMIN"));
@@ -50,8 +51,8 @@ public class RepairController {
         access.requireEquipment(auth,((Number)t.get("equipment_id")).longValue());
         if(!RepairStateRules.canTransition(prev,next)) throw new BusinessException("不允许从"+prev+"流转到"+next);
         Long operator=db.queryForObject("SELECT id FROM lab_user WHERE username=?",Long.class,auth.getName()); String note=(String)body.getOrDefault("note",""); BigDecimal cost=body.containsKey("cost")?new BigDecimal(body.get("cost").toString()):null;
-        db.update("UPDATE repair_ticket SET status=?,assignee_id=?,result=?,cost=? WHERE id=?",next,operator,note,cost,id); db.update("INSERT INTO repair_record(ticket_id,operator_id,status,note,cost) VALUES(?,?,?,?,?)",id,operator,next,note,cost);
+        db.update("UPDATE repair_ticket SET status=?,assignee_id=?,result=?,cost=?,updated_at=UTC_TIMESTAMP() WHERE id=?",next,operator,note,cost,id); db.update("INSERT INTO repair_record(ticket_id,operator_id,status,note,cost) VALUES(?,?,?,?,?)",id,operator,next,note,cost);
         if(next.equals("COMPLETED")) db.update("UPDATE equipment SET status=? WHERE id=?",Boolean.parseBoolean(String.valueOf(body.getOrDefault("restoreAvailable",false)))?"AVAILABLE":"DISABLED",t.get("equipment_id"));
-        db.update("INSERT INTO notification(user_id,title,content) SELECT reporter_id,'维修进度更新',? FROM repair_ticket WHERE id=?",next,id); db.update("INSERT INTO operation_log(operator_id,action,target_type,target_id,detail) VALUES(?,'REPAIR_PROCESS','repair_ticket',?,JSON_OBJECT('status',?,'note',?))",operator,id,next,note); return ApiResult.ok(Map.of("status",next));
+        db.update("INSERT INTO notification(user_id,title,content) SELECT t.reporter_id,'维修进度更新',CONCAT('设备【',e.code,' ',e.name,'】的报修工单状态已更新为：',CASE ? WHEN 'PROCESSING' THEN '处理中' WHEN 'WAIT_ACCEPTANCE' THEN '待验收' WHEN 'COMPLETED' THEN '已完成' WHEN 'REJECTED' THEN '已驳回' ELSE ? END,IF(?<>'',CONCAT('。处理说明：',?),'')) FROM repair_ticket t JOIN equipment e ON e.id=t.equipment_id WHERE t.id=?",next,next,note,note,id); db.update("INSERT INTO operation_log(operator_id,action,target_type,target_id,detail) VALUES(?,'REPAIR_PROCESS','repair_ticket',?,JSON_OBJECT('status',?,'note',?))",operator,id,next,note); return ApiResult.ok(Map.of("status",next));
     }
 }

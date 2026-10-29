@@ -18,9 +18,10 @@
 ```powershell
 mysql --default-character-set=utf8mb4 -u root -p < backend/src/main/resources/db/schema.sql
 mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/demo-data.sql
+mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/timezone-migration.sql
 ```
 
-输入 MySQL root 密码后，第一个脚本创建 `lab_manage` 数据库、13 张业务表及基础演示数据；第二个脚本按设备编号去重，可重复执行，用于补充更多设备档案。基础脚本适用于首次初始化，不要直接对已有业务库重复执行。时间字段使用 UTC 语义的 MySQL `DATETIME`，前端预约时间按 UTC 提交，开放时间按 `Asia/Shanghai` 转换后校验。
+输入 MySQL root 密码后，第一个脚本创建 `lab_manage` 数据库、13 张业务表及基础演示数据；第二个脚本按设备编号去重补充设备档案；第三个脚本用于旧数据库的一次性时区修复，可重复执行。全库时间字段统一保存 UTC，前端按当前电脑时区展示，实验室开放时间按 `Asia/Shanghai` 校验。
 
 ## 配置与启动
 
@@ -30,7 +31,7 @@ mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/r
 
 ```powershell
 cd backend
-$env:DB_URL='jdbc:mysql://localhost:3306/lab_manage?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC'
+$env:DB_URL='jdbc:mysql://localhost:3306/lab_manage?useUnicode=true&characterEncoding=utf8&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true'
 $env:DB_USERNAME='root'
 $env:DB_PASSWORD='<本机 MySQL 密码>'
 $env:JWT_SECRET='<至少 32 字节的随机密钥>'
@@ -40,7 +41,7 @@ mvn -s maven-settings.xml package -DskipTests
 java -jar target/lab-equipment-system-1.0.0.jar
 ```
 
-`maven-settings.xml` 将 Maven 本地仓库放在项目的 `backend/.m2/` 下，解决某些 Windows 安装目录不可写的问题。也可以在后端目录运行 `mvn test`（若全局 Maven settings 正常可写）。生产部署必须设置随机、独立且妥善保管的 `JWT_SECRET`，不可使用示例值。
+`maven-settings.xml` 将 Maven 本地仓库放在项目的 `backend/.m2/` 下，解决某些 Windows 安装目录不可写的问题。也可以在后端目录运行 `mvn test`（若全局 Maven settings 正常可写）。数据库连接会强制会话使用 UTC；前端根据当前电脑时区自动转换并以中文日期显示。生产部署必须设置随机、独立且妥善保管的 `JWT_SECRET`，不可使用示例值。
 
 前端另开终端：
 
