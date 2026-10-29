@@ -1,0 +1,29 @@
+CREATE DATABASE IF NOT EXISTS lab_manage CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+USE lab_manage;
+CREATE TABLE role (id BIGINT PRIMARY KEY AUTO_INCREMENT, code VARCHAR(32) NOT NULL UNIQUE, name VARCHAR(64) NOT NULL);
+CREATE TABLE lab_user (id BIGINT PRIMARY KEY AUTO_INCREMENT, username VARCHAR(64) NOT NULL UNIQUE, password_hash VARCHAR(100) NOT NULL, real_name VARCHAR(64) NOT NULL, email VARCHAR(128), phone VARCHAR(32), enabled BOOLEAN NOT NULL DEFAULT TRUE, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE user_role (user_id BIGINT NOT NULL, role_id BIGINT NOT NULL, PRIMARY KEY(user_id,role_id), FOREIGN KEY(user_id) REFERENCES lab_user(id), FOREIGN KEY(role_id) REFERENCES role(id));
+CREATE TABLE laboratory (id BIGINT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(100) NOT NULL UNIQUE, location VARCHAR(200) NOT NULL, open_time TIME NOT NULL DEFAULT '08:00:00', close_time TIME NOT NULL DEFAULT '22:00:00', enabled BOOLEAN NOT NULL DEFAULT TRUE);
+CREATE TABLE lab_admin_lab (user_id BIGINT NOT NULL, lab_id BIGINT NOT NULL, PRIMARY KEY(user_id,lab_id), FOREIGN KEY(user_id) REFERENCES lab_user(id), FOREIGN KEY(lab_id) REFERENCES laboratory(id));
+CREATE TABLE equipment_category (id BIGINT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(80) NOT NULL UNIQUE, description VARCHAR(500));
+CREATE TABLE equipment (id BIGINT PRIMARY KEY AUTO_INCREMENT, code VARCHAR(64) NOT NULL UNIQUE, name VARCHAR(120) NOT NULL, category_id BIGINT NOT NULL, lab_id BIGINT NOT NULL, brand_model VARCHAR(160), location VARCHAR(160), owner_id BIGINT, description TEXT, usage_rules TEXT, image_url VARCHAR(500), purchase_date DATE, status VARCHAR(20) NOT NULL DEFAULT 'AVAILABLE', version BIGINT NOT NULL DEFAULT 0, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(category_id) REFERENCES equipment_category(id), FOREIGN KEY(lab_id) REFERENCES laboratory(id), FOREIGN KEY(owner_id) REFERENCES lab_user(id), INDEX idx_equipment_filter(lab_id,category_id,status));
+CREATE TABLE reservation (id BIGINT PRIMARY KEY AUTO_INCREMENT, user_id BIGINT NOT NULL, equipment_id BIGINT NOT NULL, starts_at DATETIME NOT NULL, ends_at DATETIME NOT NULL, purpose VARCHAR(500) NOT NULL, participants INT NOT NULL, status VARCHAR(20) NOT NULL DEFAULT 'PENDING', submitted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, reviewer_id BIGINT, review_comment VARCHAR(500), FOREIGN KEY(user_id) REFERENCES lab_user(id), FOREIGN KEY(equipment_id) REFERENCES equipment(id), FOREIGN KEY(reviewer_id) REFERENCES lab_user(id), INDEX idx_reservation_conflict(equipment_id,status,starts_at,ends_at), CHECK(ends_at > starts_at), CHECK(participants > 0));
+CREATE TABLE reservation_review (id BIGINT PRIMARY KEY AUTO_INCREMENT, reservation_id BIGINT NOT NULL, reviewer_id BIGINT NOT NULL, decision VARCHAR(20) NOT NULL, comment VARCHAR(500), created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(reservation_id) REFERENCES reservation(id), FOREIGN KEY(reviewer_id) REFERENCES lab_user(id));
+CREATE TABLE repair_ticket (id BIGINT PRIMARY KEY AUTO_INCREMENT, equipment_id BIGINT NOT NULL, reporter_id BIGINT NOT NULL, fault_type VARCHAR(80) NOT NULL, description TEXT NOT NULL, image_urls TEXT, status VARCHAR(20) NOT NULL DEFAULT 'OPEN', assignee_id BIGINT, result TEXT, cost DECIMAL(10,2), created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, FOREIGN KEY(equipment_id) REFERENCES equipment(id), FOREIGN KEY(reporter_id) REFERENCES lab_user(id), FOREIGN KEY(assignee_id) REFERENCES lab_user(id), INDEX idx_repair_status(status,equipment_id));
+CREATE TABLE repair_record (id BIGINT PRIMARY KEY AUTO_INCREMENT, ticket_id BIGINT NOT NULL, operator_id BIGINT NOT NULL, status VARCHAR(20) NOT NULL, note TEXT, cost DECIMAL(10,2), created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(ticket_id) REFERENCES repair_ticket(id), FOREIGN KEY(operator_id) REFERENCES lab_user(id));
+CREATE TABLE notification (id BIGINT PRIMARY KEY AUTO_INCREMENT, user_id BIGINT NOT NULL, title VARCHAR(160) NOT NULL, content VARCHAR(1000) NOT NULL, read_at DATETIME, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(user_id) REFERENCES lab_user(id), INDEX idx_notice_user(user_id,read_at,created_at));
+CREATE TABLE operation_log (id BIGINT PRIMARY KEY AUTO_INCREMENT, operator_id BIGINT, action VARCHAR(100) NOT NULL, target_type VARCHAR(50) NOT NULL, target_id BIGINT, detail JSON, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(operator_id) REFERENCES lab_user(id), INDEX idx_operation_created(created_at));
+INSERT INTO role(code,name) VALUES ('USER','普通用户'),('LAB_ADMIN','实验室管理员'),('SYS_ADMIN','系统管理员');
+INSERT INTO laboratory(name,location) VALUES ('智能制造实验室','工科楼 A201'),('电子信息实验室','工科楼 B305');
+INSERT INTO equipment_category(name) VALUES ('测量仪器'),('计算设备'),('加工设备');
+-- Demo account hashes are BCrypt; demo password for all accounts: LabDemo123!
+INSERT INTO lab_user(username,password_hash,real_name) VALUES
+('student','$2a$10$CePvciAAo/iHSWrKymmQx.D3yYQFtx3MLwELrN8C9EHndzjyNbf0i','演示学生'),
+('labadmin','$2a$10$CePvciAAo/iHSWrKymmQx.D3yYQFtx3MLwELrN8C9EHndzjyNbf0i','实验室管理员'),
+('admin','$2a$10$CePvciAAo/iHSWrKymmQx.D3yYQFtx3MLwELrN8C9EHndzjyNbf0i','系统管理员');
+INSERT INTO user_role SELECT u.id,r.id FROM lab_user u JOIN role r ON r.code=CASE u.username WHEN 'student' THEN 'USER' WHEN 'labadmin' THEN 'LAB_ADMIN' ELSE 'SYS_ADMIN' END;
+INSERT INTO lab_admin_lab SELECT u.id,l.id FROM lab_user u JOIN laboratory l ON l.name='智能制造实验室' WHERE u.username='labadmin';
+INSERT INTO equipment(code,name,category_id,lab_id,brand_model,location,description,usage_rules,status) VALUES
+('EQ-001','数字示波器',1,2,'Rigol DS1104Z','B305-01','四通道数字示波器','使用后关闭电源并整理探头','AVAILABLE'),
+('EQ-002','精密电子天平',1,1,'梅特勒 ME204','A201-03','精度 0.1mg','保持水平，称量后清洁','AVAILABLE'),
+('EQ-003','工作站',2,1,'Dell Precision 3660','A201-08','图形工作站','需登记实验用途','AVAILABLE');
