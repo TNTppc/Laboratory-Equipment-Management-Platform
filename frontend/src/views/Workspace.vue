@@ -39,7 +39,11 @@ const busy = ref(false),
   showAutoApproval = ref(false),
   fulfillmentDialog = ref(false),
   fulfillmentRow = ref<any>(null),
-  fulfillmentStage = ref("");
+  fulfillmentStage = ref(""),
+  fulfillmentReason = ref(""),
+  fulfillmentImageUrl = ref(""),
+  fulfillmentEdit = ref(false),
+  auditRows = ref<any[]>([]);
 const autoScopeType = ref("LAB"),
   autoScopeId = ref<number | null>(null),
   autoAction = ref("APPROVE");
@@ -100,7 +104,17 @@ const title = computed(() =>
         : props.active,
 );
 const columns = computed(() =>
-  props.active === "设备档案"
+  props.active === "操作审计"
+    ? [
+        ["created_at", "时间"],
+        ["operator_name", "操作人"],
+        ["action", "操作类型"],
+        ["target_type", "对象类型"],
+        ["target_id", "对象编号"],
+        ["equipment_name", "设备"],
+        ["detail", "详情"],
+      ]
+    : props.active === "设备档案"
     ? [
         ["code", "设备编号"],
         ["name", "设备名称"],
@@ -115,9 +129,6 @@ const columns = computed(() =>
           ["starts_at", "开始时间"],
           ["ends_at", "结束时间"],
           ["purpose", "使用目的"],
-          ["credit_score", "信誉积分"],
-          ["reject_reason", "拒绝原因"],
-          ["fulfillment_status", "履约阶段"],
           ["status", "状态"],
         ]
       : props.active === "报修工单"
@@ -174,6 +185,9 @@ async function load() {
       });
       rows.value = result.items;
       total.value = result.total;
+    } else if (props.active === "操作审计") {
+      auditRows.value = await api.get("/reservations/audit");
+      rows.value = auditRows.value;
     } else if (props.active === "预约管理") {
       rows.value = manager.value
         ? await api.get("/reservations/pending")
@@ -367,14 +381,39 @@ async function submitAppeal(row: any) {
 async function markFulfillment(row: any) {
   fulfillmentRow.value = row;
   fulfillmentStage.value = "";
+  fulfillmentReason.value = "";
+  fulfillmentImageUrl.value = "";
+  fulfillmentEdit.value = false;
+  fulfillmentDialog.value = true;
+}
+function editFulfillment(row: any) {
+  fulfillmentRow.value = row;
+  fulfillmentStage.value = row.fulfillment_status;
+  fulfillmentReason.value = row.fulfillment_reason || "";
+  fulfillmentImageUrl.value = row.fulfillment_image_url || "";
+  fulfillmentEdit.value = true;
   fulfillmentDialog.value = true;
 }
 async function saveFulfillment() {
   if (!fulfillmentStage.value) return ElMessage.warning("请选择履约阶段");
-  await api.post(`/reservations/${fulfillmentRow.value.id}/fulfillment`, { stage: fulfillmentStage.value });
+  if (!["RETURNED", "NOT_STARTED"].includes(fulfillmentStage.value) && !fulfillmentReason.value.trim()) return ElMessage.warning("请填写原因");
+  const payload = { stage: fulfillmentStage.value, reason: fulfillmentReason.value, imageUrl: fulfillmentImageUrl.value };
+  if (fulfillmentEdit.value) await api.put(`/reservations/${fulfillmentRow.value.id}/fulfillment`, payload);
+  else await api.post(`/reservations/${fulfillmentRow.value.id}/fulfillment`, payload);
   fulfillmentDialog.value = false;
   ElMessage.success("履约结果已登记");
   await load();
+}
+async function uploadFulfillmentImage(options: UploadRequestOptions) {
+  try {
+    const result: any = await api.upload("/uploads/repair-image", options.file);
+    fulfillmentImageUrl.value = result.url;
+    options.onSuccess(result);
+  } catch (error) { options.onError(error as any); }
+}
+function viewRejectReason(row: any) {
+  const labels: Record<string, string> = { APPROVAL_TIMEOUT: "超过审批时限，系统自动驳回", ADMIN_REJECTED: row.review_comment || "管理员驳回", AUTO_REJECTED: row.review_comment || "命中自动审批拒绝规则" };
+  ElMessageBox.alert(labels[row.reject_reason] || row.review_comment || "系统未提供详细原因", "拒绝原因");
 }
 async function reviewAppeal(row: any, decision: string) {
   const { value } = await ElMessageBox.prompt("填写申诉审核意见", "审核履约申诉", { inputType: "textarea", inputPlaceholder: "审核意见（可选）" });
@@ -426,6 +465,7 @@ function statusType(status: string) {
 function displayValue(row: any, field: string) {
   if (field === "reject_reason") return rejectReasonLabel(row[field]);
   if (field === "fulfillment_status") return fulfillmentLabel(row[field]);
+  if (field === "detail" && typeof row[field] === "object") return JSON.stringify(row[field]);
   return dateTimeFields.has(field)
     ? formatDateTime(row[field])
     : (row[field] ?? "—");
@@ -845,9 +885,21 @@ onMounted(async () => {
                 {{ s.row.user_email || "无邮箱" }}</span
               ></template
             ></el-table-column
-          ><el-table-column label="操作" fixed="right" width="220"
+          ><el-table-column label="操作" fixed="right" width="260"
             ><template #default="scope"
               ><template v-if="active === '预约管理'"
+                ><el-button
+                  v-if="scope.row.status === 'REJECTED'"
+                  link
+                  type="warning"
+                  @click="viewRejectReason(scope.row)"
+                  >查看拒绝原因</el-button
+                ><el-button
+                  v-if="admin && scope.row.fulfillment_operator_id != null && Number(scope.row.fulfillment_operator_id) === Number(auth.user?.id) && scope.row.fulfillment_status !== 'NOT_STARTED'"
+                  link
+                  type="primary"
+                  @click="editFulfillment(scope.row)"
+                  >修正履约</el-button
                 ><el-button
                   v-if="admin && scope.row.status === 'PENDING'"
                   link
@@ -861,26 +913,19 @@ onMounted(async () => {
                   @click="review(scope.row, 'REJECTED')"
                   >驳回</el-button
                 ><el-button
-                  v-if="admin && ['APPROVED', 'COMPLETED'].includes(scope.row.status)"
+                  v-if="admin && ['APPROVED', 'COMPLETED'].includes(scope.row.status) && scope.row.fulfillment_status === 'NOT_STARTED'"
                   link
                   type="primary"
                   @click="markFulfillment(scope.row)"
                   >登记履约</el-button
                 ><el-button
-                  v-if="
-                    !manager &&
-                    ['OVERDUE_NOT_RETURNED', 'NOT_FULFILLED'].includes(scope.row.fulfillment_status) &&
-                    scope.row.appeal_status !== 'PENDING'
-                  "
+                  v-if="!manager && ['OVERDUE_NOT_RETURNED', 'NOT_FULFILLED'].includes(scope.row.fulfillment_status) && scope.row.appeal_status !== 'PENDING'"
                   link
                   type="warning"
                   @click="submitAppeal(scope.row)"
                   >发起申诉</el-button
                 ><el-button
-                  v-if="
-                    !manager &&
-                    ['PENDING', 'APPROVED'].includes(scope.row.status)
-                  "
+                  v-if="!manager && ['PENDING', 'APPROVED'].includes(scope.row.status)"
                   link
                   type="danger"
                   @click="cancel(scope.row)"
@@ -1158,16 +1203,21 @@ onMounted(async () => {
       ></el-dialog
     >
 
-    <el-dialog v-model="fulfillmentDialog" title="登记履约结果" width="420px"
+    <el-dialog v-model="fulfillmentDialog" :title="fulfillmentEdit ? '修正履约结果' : '登记履约结果'" width="480px"
       ><el-form label-position="top"
         ><el-form-item label="履约阶段" required
           ><el-select v-model="fulfillmentStage" placeholder="请选择履约阶段" style="width: 100%"
-            ><el-option label="已归还" value="RETURNED" /><el-option
-              label="未履约（扣 1 分）"
+            ><el-option label="已归还（恢复 0.5 分）" value="RETURNED" /><el-option
+              label="未履约（扣 3 至 5 分）"
               value="NOT_FULFILLED" /><el-option
-              label="逾期未归还（扣 2 分）"
-              value="OVERDUE_NOT_RETURNED" /></el-select></el-form-item
-        ><div class="upload-tip">预约结束后才可以登记；同一预约只能登记一次。</div></el-form
+              label="逾期未归还（扣 5 至 10 分）"
+              value="OVERDUE_NOT_RETURNED" /><el-option v-if="fulfillmentEdit" label="撤销登记" value="NOT_STARTED" /></el-select></el-form-item
+        ><el-form-item v-if="!['RETURNED', 'NOT_STARTED'].includes(fulfillmentStage)" label="登记原因" required
+          ><el-input v-model="fulfillmentReason" type="textarea" :rows="3" maxlength="1000" show-word-limit /></el-form-item
+        ><el-form-item v-if="!['RETURNED', 'NOT_STARTED'].includes(fulfillmentStage)" label="现场图片"
+          ><el-upload :http-request="uploadFulfillmentImage" :limit="1" accept="image/jpeg,image/png,image/webp,image/gif" list-type="picture-card" :auto-upload="true" :file-list="fulfillmentImageUrl ? [{ name: '履约现场图片', url: fulfillmentImageUrl }] : []"><el-button>上传图片</el-button></el-upload></el-form-item
+        ><a v-if="fulfillmentImageUrl" :href="fulfillmentImageUrl" target="_blank" rel="noreferrer">查看已上传图片</a>
+        <div class="upload-tip">正常履约每次恢复 0.5 分；连续违约逐次增加扣分，未履约最高 5 分、逾期最高 10 分。仅登记人可修正或撤销。</div></el-form
       ><template #footer
         ><el-button @click="fulfillmentDialog = false">取消</el-button
         ><el-button type="primary" @click="saveFulfillment">确定登记</el-button></template

@@ -21,6 +21,7 @@ mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/r
 mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/timezone-migration.sql
 mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/identity-and-approval-migration.sql
 mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/credit-and-auto-approval-migration.sql
+mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/fulfillment-accountability-migration.sql
 ```
 
 输入 MySQL root 密码后，第一个脚本创建数据库和基础演示数据；第二个脚本按设备编号补充设备档案；第三个脚本用于旧数据库时区修复；第四个脚本为旧数据库补充校园身份、必填联系方式、只读管理员和临时自动审批配置；第五个脚本补充信誉积分、履约、申诉和分范围自动审批规则。迁移脚本可重复执行，不要在已有数据库上重新执行 `schema.sql`。全库时间字段统一保存 UTC，前端按当前电脑时区展示，实验室开放时间按 `Asia/Shanghai` 校验。
@@ -81,10 +82,11 @@ npm audit --omit=dev
 - 演示数据库迁移预置了 18 条学生和 9 条教职工身份；其中学生和教职工的姓名、编号为可注册演示数据。执行 `backend/src/main/resources/db/identity-and-approval-migration.sql` 可幂等补齐现有数据库身份记录。
 - 设备和基础选项：`/api/equipment`、`/api/equipment/{id}`、`/api/labs`、`/api/categories`。
 - 预约：`/api/reservations` 及其审批、取消动作；管理员可按设备、设备分类、实验室或全局临时开启 1、4 或 8 小时自动通过/自动拒绝，优先级为设备 > 分类 > 实验室 > 全局。
-- 信誉与履约：普通用户初始信誉分为 100，每日恢复 0.5 分且不超过 100；低于 60 分禁止预约，60 至 90 分需要人工审批，达到 90 分自动通过。管理员可在预约结束后登记已归还、未履约或逾期未归还，后两者分别扣 1 分和 2 分；学生可提交一次履约申诉，管理员审核通过后返还对应积分。
+- 信誉与履约：普通用户初始信誉分为 100，每日恢复 0.5 分且不超过 100；低于 60 分禁止预约，60 至 90 分需要人工审批，达到 90 分自动通过。正常履约每次恢复 0.5 分；连续未履约从扣 3 分起、最高 5 分，连续逾期未归还从扣 5 分起、最高 10 分。管理员登记违约须填写原因，可上传图片；申诉须在预约结束后 7 天内提交。登记人可撤销或修正自己的履约登记。
 - 报修和处理：`/api/repairs`、`/api/repairs/{id}`、`/api/repairs/{id}/process`；故障图片通过 `/api/uploads/repair-image` 上传并保存到 `UPLOAD_DIR`。
 - 管理用户、实验室、分类：`/api/admin/**`；仅系统管理员可用。
 - 管理统计：`/api/stats`；实验室管理员仅统计授权实验室。
+- 管理操作审计：`/api/reservations/audit`，系统管理员和只读管理员可查全局日志，实验室管理员仅查看授权实验室相关记录（最近 500 条）。
 - OpenAPI JSON：<http://localhost:8080/v3/api-docs>；Swagger UI：<http://localhost:8080/swagger-ui.html>。
 
 接口返回统一的 `{ success, message, data }` 结构。身份认证采用 Bearer JWT；后端执行角色和实验室范围校验，前端路由/按钮控制只用于体验优化。
