@@ -20,9 +20,10 @@ mysql --default-character-set=utf8mb4 -u root -p < backend/src/main/resources/db
 mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/demo-data.sql
 mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/timezone-migration.sql
 mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/identity-and-approval-migration.sql
+mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/credit-and-auto-approval-migration.sql
 ```
 
-输入 MySQL root 密码后，第一个脚本创建数据库和基础演示数据；第二个脚本按设备编号补充设备档案；第三个脚本用于旧数据库时区修复；第四个脚本为旧数据库补充校园身份、必填联系方式、只读管理员和临时自动审批配置。迁移脚本可重复执行。全库时间字段统一保存 UTC，前端按当前电脑时区展示，实验室开放时间按 `Asia/Shanghai` 校验。
+输入 MySQL root 密码后，第一个脚本创建数据库和基础演示数据；第二个脚本按设备编号补充设备档案；第三个脚本用于旧数据库时区修复；第四个脚本为旧数据库补充校园身份、必填联系方式、只读管理员和临时自动审批配置；第五个脚本补充信誉积分、履约、申诉和分范围自动审批规则。迁移脚本可重复执行，不要在已有数据库上重新执行 `schema.sql`。全库时间字段统一保存 UTC，前端按当前电脑时区展示，实验室开放时间按 `Asia/Shanghai` 校验。
 
 ## 配置与启动
 
@@ -79,7 +80,8 @@ npm audit --omit=dev
 - 校园身份编号使用纯数字：学生学号为 `4 位入学年份 + 2 位班级编码 + 3 位编号`（示例 `202601001`），教职工工号为 `4 位入职年份 + 3 位进校流水号`（示例 `2026001`）。本项目将需求中的“班级”按 2 位数字编码实现。
 - 演示数据库迁移预置了 18 条学生和 9 条教职工身份；其中学生和教职工的姓名、编号为可注册演示数据。执行 `backend/src/main/resources/db/identity-and-approval-migration.sql` 可幂等补齐现有数据库身份记录。
 - 设备和基础选项：`/api/equipment`、`/api/equipment/{id}`、`/api/labs`、`/api/categories`。
-- 预约：`/api/reservations` 及其审批、取消动作；管理员可按实验室临时开启 1、4 或 8 小时自动审批。
+- 预约：`/api/reservations` 及其审批、取消动作；管理员可按设备、设备分类、实验室或全局临时开启 1、4 或 8 小时自动通过/自动拒绝，优先级为设备 > 分类 > 实验室 > 全局。
+- 信誉与履约：普通用户初始信誉分为 100，每日恢复 0.5 分且不超过 100；低于 60 分禁止预约，60 至 90 分需要人工审批，达到 90 分自动通过。管理员可在预约结束后登记已归还、未履约或逾期未归还，后两者分别扣 1 分和 2 分；学生可提交一次履约申诉，管理员审核通过后返还对应积分。
 - 报修和处理：`/api/repairs`、`/api/repairs/{id}`、`/api/repairs/{id}/process`；故障图片通过 `/api/uploads/repair-image` 上传并保存到 `UPLOAD_DIR`。
 - 管理用户、实验室、分类：`/api/admin/**`；仅系统管理员可用。
 - 管理统计：`/api/stats`；实验室管理员仅统计授权实验室。
@@ -93,6 +95,7 @@ npm audit --omit=dev
 - 普通用户只能预约实验室本地日期的明日至未来第 7 天，且必须落在每日开放时间内；维修中或停用设备不能预约。演示开放时间为 08:00 至 22:00。
 - 待审批预约在开始前 2 小时仍未处理时由定时任务自动驳回并发送站内通知。管理员审批通过时会复查设备状态、开放时间和冲突，但不会重新套用“提前一天提交”规则。
 - 临时自动审批开启期间，新预约仍需通过时间范围、开放时间、设备状态和并发冲突检查，符合规则后直接通过并记录审核人和通知。
+- 管理员预约列表同时展示待审批和已通过预约，便于登记履约；只读管理员可以查看但不能审批、登记或审核申诉。
 - 预约结束后，管理统计查询会将过期的已通过预约更新为已完成。
 - 设备统计总数按设备档案计数；可预约和维修中按设备当前状态计数，不把“某时段有预约”视为设备全局状态。
 - 预约总数统计所有预约记录；审批通过率口径为已通过数 /（已通过数 + 已驳回数），待审批、取消记录不进入分母。

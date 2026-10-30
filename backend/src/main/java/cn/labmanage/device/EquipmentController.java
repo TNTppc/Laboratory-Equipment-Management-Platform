@@ -22,6 +22,10 @@ public class EquipmentController {
         return ApiResult.ok(Map.of("items",rows,"total",total,"page",p,"size",s));
     }
     @GetMapping("/equipment/{id}") public ApiResult<?> detail(@PathVariable long id) { return ApiResult.ok(db.queryForMap("SELECT e.*,c.name category,l.name laboratory,u.real_name ownerName FROM equipment e JOIN equipment_category c ON c.id=e.category_id JOIN laboratory l ON l.id=e.lab_id LEFT JOIN lab_user u ON u.id=e.owner_id WHERE e.id=?",id)); }
+    @GetMapping("/equipment/options") @PreAuthorize("hasAnyRole('LAB_ADMIN','SYS_ADMIN')") public ApiResult<?> options(Authentication auth) {
+        if (access.isGlobalViewer(auth)) return ApiResult.ok(db.queryForList("SELECT e.id,e.code,e.name,l.name laboratory FROM equipment e JOIN laboratory l ON l.id=e.lab_id ORDER BY l.name,e.code"));
+        return ApiResult.ok(db.queryForList("SELECT e.id,e.code,e.name,l.name laboratory FROM equipment e JOIN laboratory l ON l.id=e.lab_id WHERE EXISTS(SELECT 1 FROM lab_admin_lab al JOIN lab_user u ON u.id=al.user_id WHERE al.lab_id=e.lab_id AND u.username=?) ORDER BY l.name,e.code", auth.getName()));
+    }
     public record EquipmentInput(@NotBlank String code,@NotBlank String name,long categoryId,long labId,String brandModel,String location,Long ownerId,String description,String usageRules,String imageUrl,LocalDate purchaseDate,String status) {}
     @PostMapping("/equipment") @PreAuthorize("hasAnyRole('LAB_ADMIN','SYS_ADMIN')") public ApiResult<?> create(@Valid @RequestBody EquipmentInput in, Authentication auth) {
         access.requireLab(auth,in.labId());

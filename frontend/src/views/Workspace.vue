@@ -31,12 +31,18 @@ const busy = ref(false),
   userOptions = ref<any[]>([]),
   contacts = ref<any[]>([]),
   autoApprovals = ref<any[]>([]),
-  selectedLab = ref<number | null>(null),
+  appeals = ref<any[]>([]),
   profile = ref<any>({}),
   profilePassword = ref(""),
   profileNewPassword = ref(""),
   autoMinutes = ref(60),
-  showAutoApproval = ref(false);
+  showAutoApproval = ref(false),
+  fulfillmentDialog = ref(false),
+  fulfillmentRow = ref<any>(null),
+  fulfillmentStage = ref("");
+const autoScopeType = ref("LAB"),
+  autoScopeId = ref<number | null>(null),
+  autoAction = ref("APPROVE");
 const keyword = ref(""),
   dialog = ref(false),
   detailDialog = ref(false),
@@ -72,6 +78,16 @@ const admin = computed(() =>
   sysadmin = computed(() => auth.user?.role === "SYS_ADMIN"),
   viewer = computed(() => auth.user?.role === "READ_ONLY_ADMIN"),
   manager = computed(() => admin.value || viewer.value);
+const autoScopeOptions = computed(() => {
+  if (autoScopeType.value === "LAB")
+    return labs.value.map((x) => ({ id: x.id, name: x.name }));
+  if (autoScopeType.value === "CATEGORY")
+    return cats.value.map((x) => ({ id: x.id, name: x.name }));
+  return equipment.value.map((x) => ({
+    id: x.id,
+    name: `${x.code || ""} ${x.name}`.trim(),
+  }));
+});
 const title = computed(() =>
   props.active === "设备档案"
     ? "设备档案"
@@ -99,6 +115,9 @@ const columns = computed(() =>
           ["starts_at", "开始时间"],
           ["ends_at", "结束时间"],
           ["purpose", "使用目的"],
+          ["credit_score", "信誉积分"],
+          ["reject_reason", "拒绝原因"],
+          ["fulfillment_status", "履约阶段"],
           ["status", "状态"],
         ]
       : props.active === "报修工单"
@@ -161,8 +180,15 @@ async function load() {
         : await api.get("/reservations");
       if (admin.value) {
         autoApprovals.value = await api.get("/reservations/auto-approval");
-        if (selectedLab.value == null)
-          selectedLab.value = autoApprovals.value[0]?.id ?? null;
+        appeals.value = await api.get("/reservations/appeals");
+        const [labData, categoryData, equipmentData]: any[] = await Promise.all([
+          api.get("/labs"),
+          api.get("/categories"),
+          api.get("/equipment/options"),
+        ]);
+        labs.value = labData;
+        cats.value = categoryData;
+        equipment.value = equipmentData;
       }
     } else if (props.active === "报修工单")
       rows.value = await api.get("/repairs");
@@ -328,6 +354,34 @@ async function cancel(row: any) {
   await api.post(`/reservations/${row.id}/cancel`);
   await load();
 }
+async function submitAppeal(row: any) {
+  const { value } = await ElMessageBox.prompt(
+    "请说明实际履约情况，管理员审核后将决定是否恢复被扣除的信誉积分。",
+    "申请预约履约申诉",
+    { inputType: "textarea", inputPlaceholder: "申诉理由", inputValidator: value => !!value?.trim() || "请填写申诉理由" },
+  );
+  await api.post(`/reservations/${row.id}/appeal`, { reason: value });
+  ElMessage.success("申诉已提交");
+  await load();
+}
+async function markFulfillment(row: any) {
+  fulfillmentRow.value = row;
+  fulfillmentStage.value = "";
+  fulfillmentDialog.value = true;
+}
+async function saveFulfillment() {
+  if (!fulfillmentStage.value) return ElMessage.warning("请选择履约阶段");
+  await api.post(`/reservations/${fulfillmentRow.value.id}/fulfillment`, { stage: fulfillmentStage.value });
+  fulfillmentDialog.value = false;
+  ElMessage.success("履约结果已登记");
+  await load();
+}
+async function reviewAppeal(row: any, decision: string) {
+  const { value } = await ElMessageBox.prompt("填写申诉审核意见", "审核履约申诉", { inputType: "textarea", inputPlaceholder: "审核意见（可选）" });
+  await api.post(`/reservations/appeals/${row.id}/review`, { decision, comment: value || "" });
+  ElMessage.success("申诉已处理");
+  await load();
+}
 async function process(row: any) {
   const { value } = await ElMessageBox.prompt(
     "填写维修说明；完成时输入“恢复”将设备恢复为可预约",
@@ -370,9 +424,20 @@ function statusType(status: string) {
   );
 }
 function displayValue(row: any, field: string) {
+  if (field === "reject_reason") return rejectReasonLabel(row[field]);
+  if (field === "fulfillment_status") return fulfillmentLabel(row[field]);
   return dateTimeFields.has(field)
     ? formatDateTime(row[field])
     : (row[field] ?? "—");
+}
+function rejectReasonLabel(reason: string) {
+  return ({ APPROVAL_TIMEOUT: "超时拒绝", ADMIN_REJECTED: "管理员拒绝", AUTO_REJECTED: "自动审批拒绝" } as Record<string, string>)[reason] || (reason ? reason : "—");
+}
+function fulfillmentLabel(stage: string) {
+  return ({ NOT_STARTED: "待登记", OVERDUE_NOT_RETURNED: "逾期未归还", NOT_FULFILLED: "未履约", RETURNED: "已归还" } as Record<string, string>)[stage] || "—";
+}
+function statusLabel(status: string) {
+  return ({ PENDING: "待审批", APPROVED: "已通过", REJECTED: "已驳回", CANCELLED: "已取消", COMPLETED: "已完成" } as Record<string, string>)[status] || status || "—";
 }
 function cutoff(row: any) {
   if (!row.starts_at) return "—";
@@ -382,12 +447,15 @@ function cutoff(row: any) {
   );
 }
 async function setAutoApproval(minutes: number) {
-  if (!selectedLab.value) return ElMessage.warning("请选择实验室");
+  if (!autoScopeId.value && autoScopeType.value !== "GLOBAL")
+    return ElMessage.warning("请选择自动审批范围");
   await api.post("/reservations/auto-approval", {
-    labId: selectedLab.value,
+    scopeType: autoScopeType.value,
+    scopeId: autoScopeId.value,
+    action: autoAction.value,
     minutes,
   });
-  ElMessage.success(minutes ? "自动审批已临时开启" : "自动审批已关闭");
+  ElMessage.success(minutes ? "自动审批规则已开启" : "自动审批规则已关闭");
   await load();
 }
 async function saveProfile() {
@@ -444,6 +512,24 @@ function disableBookingDate(date: Date) {
   const max = new Date(today);
   max.setDate(max.getDate() + 7);
   return date < min || date > max;
+}
+function bookingShortcuts(_field: "startsAt" | "endsAt") {
+  return [{
+    text: "最早可预约时间",
+    value: () => {
+      const start = new Date();
+      start.setDate(start.getDate() + 1);
+      start.setHours(8, 0, 0, 0);
+      const end = new Date(start.getTime() + 60 * 60 * 1000);
+      const inputValue = (value: Date) => {
+        const pad = (n: number) => String(n).padStart(2, "0");
+        return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}T${pad(value.getHours())}:${pad(value.getMinutes())}:00`;
+      };
+      form.value.startsAt = inputValue(start);
+      form.value.endsAt = inputValue(end);
+      return start;
+    },
+  }];
 }
 async function loadContacts() {
   contacts.value = await api.get("/auth/contacts");
@@ -600,6 +686,14 @@ onMounted(async () => {
           ><el-descriptions-item label="身份">{{
             roleLabel(profile.role)
           }}</el-descriptions-item></el-descriptions
+        ><el-alert
+          v-if="profile.role === 'USER'"
+          class="credit-alert"
+          :title="`当前信誉积分：${profile.creditScore ?? 100} 分`"
+          :type="Number(profile.creditScore ?? 100) < 60 ? 'error' : Number(profile.creditScore ?? 100) < 90 ? 'warning' : 'success'"
+          :closable="false"
+          description="90分及以上自动通过，60至90分需管理员审批，低于60分将暂时禁止预约。"
+        />
         ><el-form label-position="top" class="profile-form"
           ><el-form-item label="邮箱"
             ><el-input v-model="profile.email" type="email" /></el-form-item
@@ -669,7 +763,7 @@ onMounted(async () => {
             @click="open()"
             >提交预约</el-button
           ><el-button
-            v-if="active === '预约管理' && admin && autoApprovals.length"
+            v-if="active === '预约管理' && admin"
             @click="showAutoApproval = true"
             >自动审批</el-button
           ><el-button
@@ -726,7 +820,7 @@ onMounted(async () => {
               ><el-tag
                 v-if="column[0] === 'status'"
                 :type="statusType(scope.row[column[0]])"
-                >{{ scope.row[column[0]] }}</el-tag
+                >{{ statusLabel(scope.row[column[0]]) }}</el-tag
               ><span v-else-if="column[0] === 'enabled'">{{
                 scope.row[column[0]] ? "是" : "否"
               }}</span
@@ -766,6 +860,22 @@ onMounted(async () => {
                   type="danger"
                   @click="review(scope.row, 'REJECTED')"
                   >驳回</el-button
+                ><el-button
+                  v-if="admin && ['APPROVED', 'COMPLETED'].includes(scope.row.status)"
+                  link
+                  type="primary"
+                  @click="markFulfillment(scope.row)"
+                  >登记履约</el-button
+                ><el-button
+                  v-if="
+                    !manager &&
+                    ['OVERDUE_NOT_RETURNED', 'NOT_FULFILLED'].includes(scope.row.fulfillment_status) &&
+                    scope.row.appeal_status !== 'PENDING'
+                  "
+                  link
+                  type="warning"
+                  @click="submitAppeal(scope.row)"
+                  >发起申诉</el-button
                 ><el-button
                   v-if="
                     !manager &&
@@ -811,6 +921,24 @@ onMounted(async () => {
               ></template
             ></el-table-column
           ></el-table
+          ><template v-if="active === '预约管理' && admin"
+            ><div class="section-title reservation-appeals-title">
+              <div>
+                <h3>待处理履约申诉</h3>
+                <span>申诉通过后按违约类型恢复 1 或 2 分信誉积分</span>
+              </div>
+            </div>
+            <el-table :data="appeals" empty-text="暂无待处理申诉" stripe>
+              <el-table-column prop="applicant_name" label="申诉人" />
+              <el-table-column prop="equipment_name" label="设备" />
+              <el-table-column prop="reason" label="申诉理由" min-width="240" />
+              <el-table-column label="操作" width="180" fixed="right">
+                <template #default="s">
+                  <el-button link type="success" @click="reviewAppeal(s.row, 'APPROVED')">通过</el-button>
+                  <el-button link type="danger" @click="reviewAppeal(s.row, 'REJECTED')">驳回</el-button>
+                </template>
+              </el-table-column>
+            </el-table></template
         ><el-pagination
           v-if="active === '设备档案'"
           v-model:current-page="page"
@@ -891,14 +1019,18 @@ onMounted(async () => {
               v-model="form.startsAt"
               type="datetime"
               value-format="YYYY-MM-DDTHH:mm:ss"
-              format="YYYY年MM月DD[日] HH:mm"
+              format="YYYY年MM月DD日 HH:mm"
+              :show-now="false"
+              :shortcuts="bookingShortcuts('startsAt')"
               :disabled-date="disableBookingDate" /></el-form-item
           ><el-form-item :label="`结束时间（${currentTimeZone}）`" required
             ><el-date-picker
               v-model="form.endsAt"
               type="datetime"
               value-format="YYYY-MM-DDTHH:mm:ss"
-              format="YYYY年MM月DD[日] HH:mm"
+              format="YYYY年MM月DD日 HH:mm"
+              :show-now="false"
+              :shortcuts="bookingShortcuts('endsAt')"
               :disabled-date="disableBookingDate" /></el-form-item
           ><el-form-item label="使用目的" required
             ><el-input v-model="form.purpose" /></el-form-item
@@ -1026,15 +1158,42 @@ onMounted(async () => {
       ></el-dialog
     >
 
-    <el-dialog v-model="showAutoApproval" title="临时开启自动审批" width="480px"
+    <el-dialog v-model="fulfillmentDialog" title="登记履约结果" width="420px"
       ><el-form label-position="top"
-        ><el-form-item label="授权实验室"
-          ><el-select v-model="selectedLab" style="width: 100%"
+        ><el-form-item label="履约阶段" required
+          ><el-select v-model="fulfillmentStage" placeholder="请选择履约阶段" style="width: 100%"
+            ><el-option label="已归还" value="RETURNED" /><el-option
+              label="未履约（扣 1 分）"
+              value="NOT_FULFILLED" /><el-option
+              label="逾期未归还（扣 2 分）"
+              value="OVERDUE_NOT_RETURNED" /></el-select></el-form-item
+        ><div class="upload-tip">预约结束后才可以登记；同一预约只能登记一次。</div></el-form
+      ><template #footer
+        ><el-button @click="fulfillmentDialog = false">取消</el-button
+        ><el-button type="primary" @click="saveFulfillment">确定登记</el-button></template
+    ></el-dialog>
+
+    <el-dialog v-model="showAutoApproval" title="自动审批规则" width="520px"
+      ><el-form label-position="top"
+        ><el-form-item label="自动审批范围"
+          ><el-select v-model="autoScopeType" style="width: 100%"
+            ><el-option v-if="sysadmin" label="全局" value="GLOBAL" /><el-option
+              label="实验室"
+              value="LAB" /><el-option label="设备分类" value="CATEGORY" /><el-option
+              label="具体设备"
+              value="EQUIPMENT" /></el-select></el-form-item
+        ><el-form-item v-if="autoScopeType !== 'GLOBAL'" label="范围对象"
+          ><el-select v-model="autoScopeId" style="width: 100%"
             ><el-option
-              v-for="lab in autoApprovals"
-              :key="lab.id"
-              :label="lab.name"
-              :value="lab.id" /></el-select></el-form-item
+              v-for="item in autoScopeOptions"
+              :key="item.id"
+              :label="item.name"
+              :value="item.id" /></el-select></el-form-item
+        ><el-form-item label="自动处理方式"
+          ><el-radio-group v-model="autoAction"
+            ><el-radio-button label="APPROVE">自动通过</el-radio-button
+            ><el-radio-button label="REJECT">自动拒绝</el-radio-button></el-radio-group
+          ></el-form-item
         ><el-form-item label="生效时长"
           ><el-select v-model="autoMinutes" style="width: 100%"
             ><el-option label="1 小时" :value="60" /><el-option
@@ -1044,12 +1203,12 @@ onMounted(async () => {
               :value="480" /></el-select
         ></el-form-item>
         <div class="upload-tip">
-          期间提交的预约在完成时间和设备状态检查后会立即通过。操作将记录在系统日志中。
+          规则优先级为具体设备、设备分类、实验室、全局；同一范围的新规则覆盖旧规则。操作将记录在系统日志中。
         </div></el-form
       ><template #footer
         ><el-button @click="showAutoApproval = false">关闭</el-button
         ><el-button
-          v-if="autoApprovals.find((x) => x.id === selectedLab)?.active"
+          v-if="autoApprovals.some((x) => x.scope_type === autoScopeType && (autoScopeType === 'GLOBAL' || x.scope_id === autoScopeId) && x.active)"
           @click="setAutoApproval(0)"
           >关闭自动审批</el-button
         ><el-button type="primary" @click="setAutoApproval(autoMinutes)"
