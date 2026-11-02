@@ -77,6 +77,8 @@ public class ReservationAccountabilityController {
         access.requireEquipment(auth, ((Number) row.get("equipment_id")).longValue());
         Long operator = db.queryForObject("SELECT id FROM lab_user WHERE username=?", Long.class, auth.getName());
         if (row.get("fulfillment_operator_id") == null || !operator.equals(((Number) row.get("fulfillment_operator_id")).longValue())) throw new BusinessException("只能撤销或修正自己登记的履约结果");
+        Integer approvedAppeal = db.queryForObject("SELECT COUNT(*) FROM reservation_appeal WHERE reservation_id=? AND status='APPROVED'", Integer.class, id);
+        if (approvedAppeal != null && approvedAppeal > 0) throw new BusinessException("该预约的申诉已通过，履约状态已确定为已完成，不能再次修正");
         String stage = String.valueOf(body.get("stage"));
         if (!Set.of("OVERDUE_NOT_RETURNED", "NOT_FULFILLED", "RETURNED", "NOT_STARTED").contains(stage)) throw new BusinessException("履约阶段不合法");
         String oldStage = String.valueOf(row.get("fulfillment_status"));
@@ -122,6 +124,7 @@ public class ReservationAccountabilityController {
         if (withinDeadline == null || withinDeadline == 0) throw new BusinessException("预约结束超过7天，已无法申诉");
         int inserted = db.update("INSERT IGNORE INTO reservation_appeal(reservation_id,applicant_id,reason,image_url) VALUES(?,?,?,?)", id, uid, reason.trim(), imageUrl.isBlank() ? null : imageUrl);
         if (inserted == 0) throw new BusinessException("该预约已经提交过申诉，不能重复提交");
+        db.update("INSERT INTO notification(user_id,title,content) SELECT DISTINCT ur.user_id,'新的履约申诉待审核',CONCAT('用户【',u.real_name,'】对设备【',e.code,' ',e.name,'】（',l.name,'）的预约履约结果（',CASE r.fulfillment_status WHEN 'NOT_FULFILLED' THEN '未履约' ELSE '逾期未归还' END,'）提交了申诉，请及时审核。申诉理由：',?,'。') FROM reservation r JOIN lab_user u ON u.id=r.user_id JOIN equipment e ON e.id=r.equipment_id JOIN laboratory l ON l.id=e.lab_id JOIN user_role ur JOIN role role ON role.id=ur.role_id LEFT JOIN lab_admin_lab al ON al.user_id=ur.user_id AND al.lab_id=e.lab_id WHERE r.id=? AND (role.code='SYS_ADMIN' OR (role.code='LAB_ADMIN' AND al.lab_id IS NOT NULL))", reason.trim(), id);
         db.update("INSERT INTO operation_log(operator_id,action,target_type,target_id,detail) VALUES(?,'RESERVATION_APPEAL','reservation',?,JSON_OBJECT('reason',?,'imageUrl',?))", uid, id, reason.trim(), imageUrl);
         return ApiResult.ok(Map.of("submitted", true));
     }
@@ -163,8 +166,9 @@ public class ReservationAccountabilityController {
             double delta = number(reservation.get("fulfillment_penalty"));
             int inserted = db.update("INSERT IGNORE INTO credit_ledger(user_id,reservation_id,delta,reason,idempotency_key) VALUES(?,?,?,?,?)", reservation.get("applicant_id"), reservation.get("reservation_id"), delta, "申诉通过返还", "appeal:" + id);
             if (inserted == 1) db.update("UPDATE lab_user SET credit_score=LEAST(100.0,credit_score+?) WHERE id=?", delta, reservation.get("applicant_id"));
+            db.update("UPDATE reservation SET fulfillment_status='COMPLETED',fulfillment_penalty=0 WHERE id=? AND fulfillment_status IN ('NOT_FULFILLED','OVERDUE_NOT_RETURNED')", reservation.get("reservation_id"));
         }
-        db.update("INSERT INTO notification(user_id,title,content) SELECT a.applicant_id,'履约申诉审核结果',CONCAT('您对设备【',e.code,' ',e.name,'】预约的履约申诉已',CASE ? WHEN 'APPROVED' THEN '通过，相关信誉积分已返还' ELSE '驳回' END,IF(?<>'',CONCAT('。审核意见：',?),''),'。') FROM reservation_appeal a JOIN reservation r ON r.id=a.reservation_id JOIN equipment e ON e.id=r.equipment_id WHERE a.id=?", decision, comment, comment, id);
+        db.update("INSERT INTO notification(user_id,title,content) SELECT a.applicant_id,'履约申诉审核结果',CONCAT('您对设备【',e.code,' ',e.name,'】预约的履约申诉已',CASE ? WHEN 'APPROVED' THEN '通过，相关信誉积分已返还，该预约的履约状态已更新为“已完成”' ELSE '驳回' END,IF(?<>'',CONCAT('。审核意见：',?),''),'。') FROM reservation_appeal a JOIN reservation r ON r.id=a.reservation_id JOIN equipment e ON e.id=r.equipment_id WHERE a.id=?", decision, comment, comment, id);
         db.update("INSERT INTO operation_log(operator_id,action,target_type,target_id,detail) VALUES(?,'RESERVATION_APPEAL_REVIEW','reservation_appeal',?,JSON_OBJECT('decision',?,'comment',?))", reviewer, id, decision, comment);
         return ApiResult.ok(Map.of("status", decision));
     }

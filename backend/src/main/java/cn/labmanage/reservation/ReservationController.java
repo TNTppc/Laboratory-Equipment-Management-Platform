@@ -10,6 +10,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 import java.time.*;
 import java.math.BigDecimal;
+import java.util.Locale;
 import java.util.Map;
 import cn.labmanage.security.AccessService;
 
@@ -22,6 +23,15 @@ public class ReservationController {
     private Long userId(String name) { return db.queryForObject("SELECT id FROM lab_user WHERE username=?",Long.class,name); }
     private void refreshCredit(Long uid) {
         db.update("UPDATE lab_user SET credit_score=LEAST(100.0,credit_score+0.5*DATEDIFF(UTC_DATE(),COALESCE(credit_recovered_on,UTC_DATE()))),credit_recovered_on=UTC_DATE() WHERE id=?", uid);
+    }
+    private static double cancellationPenalty(LocalDateTime startsAt, LocalDateTime nowUtc) {
+        long seconds=Duration.between(nowUtc,startsAt).getSeconds();
+        if(seconds>=48*3600) return 1.0;
+        if(seconds>=24*3600) return 2.0;
+        return 4.0;
+    }
+    private static double hoursUntil(LocalDateTime startsAt, LocalDateTime nowUtc) {
+        return Math.round(Duration.between(nowUtc,startsAt).getSeconds()/360.0)/10.0;
     }
     private Map<String,Object> autoRule(long equipmentId) {
         var rules=db.queryForList("SELECT r.enabled_by,r.action,r.scope_type FROM auto_approval_rule r JOIN equipment e ON (r.scope_type='EQUIPMENT' AND r.scope_id=e.id) OR (r.scope_type='CATEGORY' AND r.scope_id=e.category_id) OR (r.scope_type='LAB' AND r.scope_id=e.lab_id) OR r.scope_type='GLOBAL' WHERE e.id=? AND r.enabled_until>UTC_TIMESTAMP() ORDER BY CASE r.scope_type WHEN 'EQUIPMENT' THEN 1 WHEN 'CATEGORY' THEN 2 WHEN 'LAB' THEN 3 WHEN 'GLOBAL' THEN 4 END,r.updated_at DESC LIMIT 1", equipmentId);
@@ -51,18 +61,20 @@ public class ReservationController {
         String status=autoRejected?"REJECTED":autoApproved?"APPROVED":"PENDING";
         String reason=autoRejected?"AUTO_REJECTED":null;
         String comment=autoRejected?"命中自动审批拒绝规则":creditAuto?"信誉积分达到90分，系统自动通过":ruleActive?"命中自动审批通过规则":"";
-        db.update("INSERT INTO reservation(user_id,equipment_id,starts_at,ends_at,purpose,participants,status,reject_reason,reviewer_id,review_comment) VALUES(?,?,?,?,?,?,?,?,?,?)",uid,b.equipmentId(),b.startsAt(),b.endsAt(),b.purpose(),b.participants(),status,reason,reviewer,comment);
+        boolean creditApproval=creditAuto && "APPROVED".equals(status);
+        db.update("INSERT INTO reservation(user_id,equipment_id,starts_at,ends_at,purpose,participants,status,reject_reason,reviewer_id,review_comment,auto_credit_approved) VALUES(?,?,?,?,?,?,?,?,?,?,?)",uid,b.equipmentId(),b.startsAt(),b.endsAt(),b.purpose(),b.participants(),status,reason,reviewer,comment,creditApproval);
         Long reservationId=db.queryForObject("SELECT LAST_INSERT_ID()",Long.class);
         if(autoApproved || autoRejected) {
             db.update("INSERT INTO reservation_review(reservation_id,reviewer_id,decision,comment) VALUES(?,?,?,?)",reservationId,reviewer,status,comment);
             if(autoRejected) db.update("INSERT INTO notification(user_id,title,content) SELECT r.user_id,'预约自动拒绝',CONCAT('设备【',e.code,' ',e.name,'】的预约命中了自动拒绝规则，系统已拒绝。请联系实验室管理员。') FROM reservation r JOIN equipment e ON e.id=r.equipment_id WHERE r.id=?",reservationId);
             else
-            db.update("INSERT INTO notification(user_id,title,content) SELECT r.user_id,'预约已自动通过',CONCAT('设备【',e.code,' ',e.name,'】（',l.name,'）当前开启自动审批，您的预约已通过。使用时间：',DATE_FORMAT(CONVERT_TZ(r.starts_at,'+00:00','+08:00'),'%Y年%m月%d日 %H:%i'),' 至 ',DATE_FORMAT(CONVERT_TZ(r.ends_at,'+00:00','+08:00'),'%H:%i'),'。') FROM reservation r JOIN equipment e ON e.id=r.equipment_id JOIN laboratory l ON l.id=e.lab_id WHERE r.id=?",reservationId);
+            db.update("INSERT INTO notification(user_id,title,content) SELECT r.user_id,'预约已自动通过',CONCAT('设备【',e.code,' ',e.name,'】（',l.name,'）的预约已由系统自动通过（',?,'）。使用时间：',DATE_FORMAT(CONVERT_TZ(r.starts_at,'+00:00','+08:00'),'%Y年%m月%d日 %H:%i'),' 至 ',DATE_FORMAT(CONVERT_TZ(r.ends_at,'+00:00','+08:00'),'%H:%i'),'。') FROM reservation r JOIN equipment e ON e.id=r.equipment_id JOIN laboratory l ON l.id=e.lab_id WHERE r.id=?", creditAuto?"信誉积分达到90分":"已开启自动审批规则", reservationId);
+            if(creditApproval) db.update("INSERT INTO notification(user_id,title,content) SELECT DISTINCT ur.user_id,'信誉积分自动通过预约',CONCAT('用户【',u.real_name,'】的信誉积分为 ',u.credit_score,' 分（达到90分），系统已自动通过其对设备【',e.code,' ',e.name,'】（',l.name,'）的预约。使用时间：',DATE_FORMAT(CONVERT_TZ(r.starts_at,'+00:00','+08:00'),'%Y年%m月%d日 %H:%i'),' 至 ',DATE_FORMAT(CONVERT_TZ(r.ends_at,'+00:00','+08:00'),'%H:%i'),'。如认为不应通过，可在预约管理中撤销自动通过。') FROM reservation r JOIN lab_user u ON u.id=r.user_id JOIN equipment e ON e.id=r.equipment_id JOIN laboratory l ON l.id=e.lab_id JOIN user_role ur JOIN role role ON role.id=ur.role_id LEFT JOIN lab_admin_lab al ON al.user_id=ur.user_id AND al.lab_id=e.lab_id WHERE r.id=? AND (role.code='SYS_ADMIN' OR (role.code='LAB_ADMIN' AND al.lab_id IS NOT NULL))",reservationId);
         } else db.update("INSERT INTO notification(user_id,title,content) SELECT DISTINCT ur.user_id,'新预约待审批',CONCAT('用户【',u.real_name,'】申请使用设备【',e.code,' ',e.name,'】（',l.name,'）。使用时间：',DATE_FORMAT(CONVERT_TZ(r.starts_at,'+00:00','+08:00'),'%Y年%m月%d日 %H:%i'),' 至 ',DATE_FORMAT(CONVERT_TZ(r.ends_at,'+00:00','+08:00'),'%H:%i'),'；用途：',r.purpose,'；参与人数：',r.participants,'人。') FROM reservation r JOIN lab_user u ON u.id=r.user_id JOIN equipment e ON e.id=r.equipment_id JOIN laboratory l ON l.id=e.lab_id JOIN user_role ur JOIN role role ON role.id=ur.role_id LEFT JOIN lab_admin_lab al ON al.user_id=ur.user_id AND al.lab_id=e.lab_id WHERE r.id=? AND (role.code='SYS_ADMIN' OR (role.code='LAB_ADMIN' AND al.lab_id IS NOT NULL))",reservationId);
-        return ApiResult.ok(Map.of("id",reservationId,"status",status,"creditScore",credit));
+        return ApiResult.ok(Map.of("id",reservationId,"status",status,"creditScore",credit,"creditApproved",creditApproval));
     }
     @GetMapping public ApiResult<?> list(Authentication auth) { return ApiResult.ok(db.queryForList("SELECT r.*,u.real_name user_name,e.name equipment_name,a.status appeal_status FROM reservation r JOIN lab_user u ON u.id=r.user_id JOIN equipment e ON e.id=r.equipment_id LEFT JOIN reservation_appeal a ON a.reservation_id=r.id WHERE r.user_id=? ORDER BY r.submitted_at DESC",userId(auth.getName()))); }
-    @GetMapping("/pending") @PreAuthorize("hasAnyRole('LAB_ADMIN','SYS_ADMIN','READ_ONLY_ADMIN')") public ApiResult<?> pending(Authentication auth) { workflow.expireOverdueReservations(); String scope=access.isGlobalViewer(auth)?"":" AND EXISTS(SELECT 1 FROM lab_admin_lab al JOIN lab_user au ON au.id=al.user_id WHERE al.lab_id=e.lab_id AND au.username=?)"; String sql="SELECT r.*,u.real_name user_name,u.email user_email,u.phone user_phone,ci.identity_no user_identity_no,e.name equipment_name,l.name laboratory FROM reservation r JOIN lab_user u ON u.id=r.user_id LEFT JOIN campus_identity ci ON ci.id=u.identity_id JOIN equipment e ON e.id=r.equipment_id JOIN laboratory l ON l.id=e.lab_id WHERE r.status IN ('PENDING','APPROVED','COMPLETED')"+scope+" ORDER BY CASE r.status WHEN 'PENDING' THEN 0 ELSE 1 END,r.starts_at"; return ApiResult.ok(access.isGlobalViewer(auth)?db.queryForList(sql):db.queryForList(sql,auth.getName())); }
+    @GetMapping("/pending") @PreAuthorize("hasAnyRole('LAB_ADMIN','SYS_ADMIN','READ_ONLY_ADMIN')") public ApiResult<?> pending(Authentication auth) { workflow.expireOverdueReservations(); String scope=access.isGlobalViewer(auth)?"":" AND EXISTS(SELECT 1 FROM lab_admin_lab al JOIN lab_user au ON au.id=al.user_id WHERE al.lab_id=e.lab_id AND au.username=?)"; String sql="SELECT r.*,a.status appeal_status,u.real_name user_name,u.email user_email,u.phone user_phone,ci.identity_no user_identity_no,e.name equipment_name,l.name laboratory FROM reservation r LEFT JOIN reservation_appeal a ON a.reservation_id=r.id JOIN lab_user u ON u.id=r.user_id LEFT JOIN campus_identity ci ON ci.id=u.identity_id JOIN equipment e ON e.id=r.equipment_id JOIN laboratory l ON l.id=e.lab_id WHERE r.status IN ('PENDING','APPROVED','COMPLETED')"+scope+" ORDER BY CASE r.status WHEN 'PENDING' THEN 0 ELSE 1 END,r.starts_at"; return ApiResult.ok(access.isGlobalViewer(auth)?db.queryForList(sql):db.queryForList(sql,auth.getName())); }
     @PostMapping("/{id}/review") @PreAuthorize("hasAnyRole('LAB_ADMIN','SYS_ADMIN')") @Transactional public ApiResult<?> review(@PathVariable long id,@RequestBody Map<String,String> body,Authentication auth) {
         workflow.expireOverdueReservations();
         var rows=db.queryForList("SELECT * FROM reservation WHERE id=? FOR UPDATE",id); if(rows.isEmpty()) throw new BusinessException("预约不存在"); var r=rows.get(0);
@@ -73,8 +85,39 @@ public class ReservationController {
         Long reviewer=userId(auth.getName()); String comment=body.getOrDefault("comment",""); db.update("UPDATE reservation SET status=?,reject_reason=?,reviewer_id=?,review_comment=? WHERE id=?",decision,"REJECTED".equals(decision)?"ADMIN_REJECTED":null,reviewer,comment,id); db.update("INSERT INTO reservation_review(reservation_id,reviewer_id,decision,comment) VALUES(?,?,?,?)",id,reviewer,decision,comment);
         db.update("INSERT INTO notification(user_id,title,content) SELECT r.user_id,'预约审核结果',CONCAT('设备【',e.code,' ',e.name,'】（',l.name,'）的预约已',?,'。使用时间：',DATE_FORMAT(CONVERT_TZ(r.starts_at,'+00:00','+08:00'),'%Y年%m月%d日 %H:%i'),' 至 ',DATE_FORMAT(CONVERT_TZ(r.ends_at,'+00:00','+08:00'),'%H:%i'),'；用途：',r.purpose,IF(?<>'','；审核意见：',''),?) FROM reservation r JOIN equipment e ON e.id=r.equipment_id JOIN laboratory l ON l.id=e.lab_id WHERE r.id=?", "APPROVED".equals(decision)?"通过":"驳回",comment,comment,id); db.update("INSERT INTO operation_log(operator_id,action,target_type,target_id,detail) VALUES(?,'RESERVATION_REVIEW','reservation',?,JSON_OBJECT('decision',?,'comment',?))",reviewer,id,decision,comment); return ApiResult.ok(Map.of("status",decision));
     }
+    @GetMapping("/{id}/cancel-preview") public ApiResult<?> cancelPreview(@PathVariable long id,Authentication auth) {
+        Long uid=userId(auth.getName());
+        var rows=db.queryForList("SELECT id,status,starts_at FROM reservation WHERE id=? AND user_id=? AND status IN ('PENDING','APPROVED') AND starts_at>UTC_TIMESTAMP()",id,uid);
+        if(rows.isEmpty()) throw new BusinessException("预约不存在，或当前状态/时间不允许取消");
+        var row=rows.get(0); LocalDateTime startsAt=DateTimeValues.toLocalDateTime(row.get("starts_at")), now=LocalDateTime.now(ZoneOffset.UTC);
+        boolean approved="APPROVED".equals(row.get("status"));
+        return ApiResult.ok(Map.of("status",row.get("status"),"hoursUntilStart",hoursUntil(startsAt,now),"penalty",approved?cancellationPenalty(startsAt,now):0.0));
+    }
     @PostMapping("/{id}/cancel") @Transactional public ApiResult<?> cancel(@PathVariable long id,Authentication auth) {
-        Long uid=userId(auth.getName()); int n=db.update("UPDATE reservation SET status='CANCELLED' WHERE id=? AND user_id=? AND status IN ('PENDING','APPROVED') AND starts_at > UTC_TIMESTAMP()",id,uid);
-        if(n==0) throw new BusinessException("预约不存在，或当前状态/时间不允许取消"); return ApiResult.ok(Map.of("cancelled",true));
+        Long uid=userId(auth.getName());
+        var rows=db.queryForList("SELECT * FROM reservation WHERE id=? AND user_id=? AND status IN ('PENDING','APPROVED') AND starts_at>UTC_TIMESTAMP() FOR UPDATE",id,uid);
+        if(rows.isEmpty()) throw new BusinessException("预约不存在，或当前状态/时间不允许取消");
+        var row=rows.get(0); LocalDateTime startsAt=DateTimeValues.toLocalDateTime(row.get("starts_at")), now=LocalDateTime.now(ZoneOffset.UTC);
+        boolean approved="APPROVED".equals(row.get("status"));
+        double penalty=approved?cancellationPenalty(startsAt,now):0.0;
+        db.update("UPDATE reservation SET status='CANCELLED' WHERE id=?",id);
+        if(penalty>0) {
+            int inserted=db.update("INSERT IGNORE INTO credit_ledger(user_id,reservation_id,delta,reason,idempotency_key) VALUES(?,?,?,'取消预约',?)",uid,id,-penalty,"cancel:"+id);
+            if(inserted==1) db.update("UPDATE lab_user SET credit_score=GREATEST(0.0,credit_score-?) WHERE id=?",penalty,uid);
+            db.update("INSERT INTO notification(user_id,title,content) SELECT DISTINCT ur.user_id,'已通过的预约被取消',CONCAT('用户【',u.real_name,'】取消了设备【',e.code,' ',e.name,'】（',l.name,'）已通过的预约。原使用时间：',DATE_FORMAT(CONVERT_TZ(r.starts_at,'+00:00','+08:00'),'%Y年%m月%d日 %H:%i'),' 至 ',DATE_FORMAT(CONVERT_TZ(r.ends_at,'+00:00','+08:00'),'%H:%i'),'；距开始约 ',?,' 小时，按退约规则扣除 ',?,' 分信誉积分。') FROM reservation r JOIN lab_user u ON u.id=r.user_id JOIN equipment e ON e.id=r.equipment_id JOIN laboratory l ON l.id=e.lab_id JOIN user_role ur JOIN role role ON role.id=ur.role_id LEFT JOIN lab_admin_lab al ON al.user_id=ur.user_id AND al.lab_id=e.lab_id WHERE r.id=? AND (role.code='SYS_ADMIN' OR (role.code='LAB_ADMIN' AND al.lab_id IS NOT NULL))",String.format(Locale.ROOT,"%.1f",hoursUntil(startsAt,now)),BigDecimal.valueOf(penalty),id);
+        }
+        return ApiResult.ok(Map.of("cancelled",true,"penalty",penalty));
+    }
+    @PostMapping("/{id}/revoke-approval") @PreAuthorize("hasAnyRole('LAB_ADMIN','SYS_ADMIN')") @Transactional public ApiResult<?> revokeApproval(@PathVariable long id,Authentication auth) {
+        var rows=db.queryForList("SELECT * FROM reservation WHERE id=? FOR UPDATE",id); if(rows.isEmpty()) throw new BusinessException("预约不存在"); var row=rows.get(0);
+        access.requireEquipment(auth,((Number)row.get("equipment_id")).longValue());
+        if(!"APPROVED".equals(row.get("status"))) throw new BusinessException("只有已通过的预约可以撤销通过");
+        if(!DateTimeValues.toLocalDateTime(row.get("starts_at")).isAfter(LocalDateTime.now(ZoneOffset.UTC).plusHours(2))) throw new BusinessException("距离预约开始不足2小时，不能撤销通过");
+        Long reviewer=userId(auth.getName());
+        db.update("UPDATE reservation SET status='PENDING',auto_credit_approved=FALSE,reviewer_id=NULL,review_comment=NULL WHERE id=?",id);
+        db.update("INSERT INTO reservation_review(reservation_id,reviewer_id,decision,comment) VALUES(?,?,'REVOKED','管理员撤销通过')",id,reviewer);
+        db.update("INSERT INTO notification(user_id,title,content) SELECT r.user_id,'预约已被撤销通过',CONCAT('设备【',e.code,' ',e.name,'】（',l.name,'）的预约已由管理员撤销通过，预约回到待审批状态，请等待重新审核。使用时间：',DATE_FORMAT(CONVERT_TZ(r.starts_at,'+00:00','+08:00'),'%Y年%m月%d日 %H:%i'),' 至 ',DATE_FORMAT(CONVERT_TZ(r.ends_at,'+00:00','+08:00'),'%H:%i'),'。') FROM reservation r JOIN equipment e ON e.id=r.equipment_id JOIN laboratory l ON l.id=e.lab_id WHERE r.id=?",id);
+        db.update("INSERT INTO operation_log(operator_id,action,target_type,target_id,detail) VALUES(?,'RESERVATION_REVOKE_APPROVAL','reservation',?,JSON_OBJECT('reviewer',?))",reviewer,id,reviewer);
+        return ApiResult.ok(Map.of("status","PENDING"));
     }
 }

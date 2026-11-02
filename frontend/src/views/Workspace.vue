@@ -48,7 +48,13 @@ const busy = ref(false),
   appealReason = ref(""),
   appealImageUrl = ref(""),
   appealFiles = ref<UploadFile[]>([]),
-  auditRows = ref<any[]>([]);
+  auditRows = ref<any[]>([]),
+  cancelDialog = ref(false),
+  cancelRow = ref<any>(null),
+  cancelInfo = ref<any>({}),
+  cancelRuleDialog = ref(false),
+  changeDialog = ref(false),
+  changeRows = ref<any[]>([]);
 const autoScopeType = ref("LAB"),
   autoScopeId = ref<number | null>(null),
   autoAction = ref("APPROVE");
@@ -72,6 +78,24 @@ const faultTypes = [
   "安全隐患",
   "其他",
 ];
+const cancelRules = [
+  { window: "距预约开始 48 小时以上", penalty: "1 分" },
+  { window: "距预约开始 24 小时以上、不足 48 小时", penalty: "2 分" },
+  { window: "距预约开始不足 24 小时", penalty: "4 分" },
+];
+const equipmentChangeFields = [
+  ["code", "设备编号"],
+  ["name", "设备名称"],
+  ["categoryId", "设备分类"],
+  ["labId", "所属实验室"],
+  ["brandModel", "品牌型号"],
+  ["location", "存放位置"],
+  ["description", "设备说明"],
+  ["usageRules", "使用规则"],
+  ["imageUrl", "图片地址"],
+  ["purchaseDate", "购置日期"],
+  ["status", "状态"],
+] as const;
 const currentTimeZone = timeZoneLabel();
 const dateTimeFields = new Set([
   "starts_at",
@@ -86,7 +110,24 @@ const admin = computed(() =>
   ),
   sysadmin = computed(() => auth.user?.role === "SYS_ADMIN"),
   viewer = computed(() => auth.user?.role === "READ_ONLY_ADMIN"),
-  manager = computed(() => admin.value || viewer.value);
+  manager = computed(() => admin.value || viewer.value),
+  manageableLabIds = computed(() =>
+    Array.isArray(auth.user?.labIds)
+      ? auth.user.labIds.map((x: any) => Number(x))
+      : [],
+  ),
+  editableLabs = computed(() =>
+    sysadmin.value
+      ? labs.value
+      : labs.value.filter((x: any) =>
+          manageableLabIds.value.includes(Number(x.id)),
+        ),
+  ),
+  manageableLabNames = computed(() =>
+    labs.value
+      .filter((x: any) => manageableLabIds.value.includes(Number(x.id)))
+      .map((x: any) => x.name),
+  );
 const autoScopeOptions = computed(() => {
   if (autoScopeType.value === "LAB")
     return labs.value.map((x) => ({ id: x.id, name: x.name }));
@@ -190,6 +231,7 @@ async function load() {
       });
       rows.value = result.items;
       total.value = result.total;
+      if (admin.value) labs.value = await api.get("/labs");
     } else if (props.active === "操作审计") {
       auditRows.value = await api.get("/reservations/audit");
       rows.value = auditRows.value;
@@ -199,7 +241,6 @@ async function load() {
         : await api.get("/reservations");
       if (admin.value) {
         autoApprovals.value = await api.get("/reservations/auto-approval");
-        appeals.value = await api.get("/reservations/appeals");
         const [labData, categoryData, equipmentData]: any[] = await Promise.all([
           api.get("/labs"),
           api.get("/categories"),
@@ -209,7 +250,9 @@ async function load() {
         cats.value = categoryData;
         equipment.value = equipmentData;
       }
-    } else if (props.active === "报修工单")
+    } else if (props.active === "履约申诉")
+      appeals.value = await api.get("/reservations/appeals");
+    else if (props.active === "报修工单")
       rows.value = await api.get("/repairs");
     else if (props.active === "用户管理")
       rows.value = await api.get("/admin/users");
@@ -290,11 +333,15 @@ async function open(row?: any) {
   dialog.value = true;
 }
 async function save() {
-  if (props.active === "设备档案")
-    editId.value
+  let message = "已保存";
+  let creditApprovalNotice: string | null = null;
+  if (props.active === "设备档案") {
+    const result: any = editId.value
       ? await api.put(`/equipment/${editId.value}`, form.value)
       : await api.post("/equipment", form.value);
-  else if (props.active === "预约管理") {
+    if (result?.pendingApproval)
+      message = "修改已提交，等待系统管理员审批后生效";
+  } else if (props.active === "预约管理") {
     if (
       !form.value.equipmentId ||
       !form.value.startsAt ||
@@ -302,11 +349,27 @@ async function save() {
       !form.value.purpose?.trim()
     )
       return ElMessage.warning("请完整填写设备、预约时间和使用目的");
-    await api.post("/reservations", {
+    const selected = equipment.value.find(
+      (x) => Number(x.id) === Number(form.value.equipmentId),
+    );
+    const startsAt = localInputToUtc(form.value.startsAt);
+    const endsAt = localInputToUtc(form.value.endsAt);
+    const result: any = await api.post("/reservations", {
       ...form.value,
-      startsAt: localInputToUtc(form.value.startsAt),
-      endsAt: localInputToUtc(form.value.endsAt),
+      startsAt,
+      endsAt,
     });
+    if (result?.status === "PENDING")
+      message = "预约已提交，等待实验室管理员审批";
+    else if (result?.status === "REJECTED") message = "预约已被系统自动拒绝";
+    else message = "预约已自动通过";
+    if (result?.creditApproved) {
+      creditApprovalNotice = [
+        `设备：${escapeHtml(selected?.name || "所选设备")}`,
+        `使用时间：${escapeHtml(formatDateTime(startsAt))} 至 ${escapeHtml(formatDateTime(endsAt))}`,
+        `当前信誉积分：${escapeHtml(String(result.creditScore ?? ""))} 分（已达到 90 分），系统已自动通过本次预约。管理员如认为不应通过，可以撤销该自动通过。`,
+      ].join("<br/>");
+    }
   } else if (props.active === "报修工单") {
     if (!form.value.equipmentId) return ElMessage.warning("请选择报修设备");
     if (!form.value.faultType) return ElMessage.warning("请选择故障类型");
@@ -330,8 +393,14 @@ async function save() {
       : await api.post(root, form.value);
   }
   dialog.value = false;
-  ElMessage.success("已保存");
+  ElMessage.success(message);
   await load();
+  if (creditApprovalNotice) {
+    await ElMessageBox.alert(creditApprovalNotice, "预约已自动通过", {
+      dangerouslyUseHTMLString: true,
+      confirmButtonText: "知道了",
+    });
+  }
 }
 async function uploadRepairImage(options: UploadRequestOptions) {
   repairUploading.value = true;
@@ -383,8 +452,116 @@ async function review(row: any, decision: string) {
   await load();
 }
 async function cancel(row: any) {
-  await ElMessageBox.confirm("确定取消该预约？", "确认操作");
-  await api.post(`/reservations/${row.id}/cancel`);
+  const preview: any = await api.get(`/reservations/${row.id}/cancel-preview`);
+  cancelRow.value = row;
+  cancelInfo.value = preview;
+  cancelDialog.value = true;
+}
+async function confirmCancel() {
+  const result: any = await api.post(`/reservations/${cancelRow.value.id}/cancel`);
+  cancelDialog.value = false;
+  const penalty = Number(result?.penalty || 0);
+  ElMessage.success(
+    penalty > 0
+      ? `预约已取消，已扣除 ${penalty} 分信誉积分`
+      : "预约已取消，未扣除信誉积分",
+  );
+  await load();
+}
+async function revokeApproval(row: any) {
+  await ElMessageBox.confirm(
+    "撤销后该预约将回到待审批状态，需要重新审核，学生也会收到通知。预约开始前 2 小时内不能撤销通过。",
+    "撤销通过",
+    { type: "warning", confirmButtonText: "撤销通过", cancelButtonText: "返回" },
+  );
+  await api.post(`/reservations/${row.id}/revoke-approval`);
+  ElMessage.success("已撤销通过，预约回到待审批状态");
+  await load();
+}
+async function openChanges() {
+  const [labData, categoryData]: any[] = await Promise.all([
+    api.get("/labs"),
+    api.get("/categories"),
+  ]);
+  labs.value = labData;
+  cats.value = categoryData;
+  await refreshChanges();
+  changeDialog.value = true;
+}
+async function refreshChanges() {
+  const requests: any[] = await api.get("/equipment/change-requests");
+  changeRows.value = requests.map((row: any) => ({
+    ...row,
+    diff: buildChangeDiff(row),
+  }));
+}
+function equipmentStatusLabel(status: string) {
+  return (
+    ({ AVAILABLE: "可预约", MAINTENANCE: "维修中", DISABLED: "停用" } as Record<
+      string,
+      string
+    >)[status] ||
+    status ||
+    "—"
+  );
+}
+function changeValue(field: string, value: any) {
+  if (field === "status") return equipmentStatusLabel(value);
+  if (field === "categoryId")
+    return (
+      cats.value.find((x) => Number(x.id) === Number(value))?.name ??
+      (value ?? "—")
+    );
+  if (field === "labId")
+    return (
+      labs.value.find((x) => Number(x.id) === Number(value))?.name ??
+      (value ?? "—")
+    );
+  return value === null || value === undefined || value === ""
+    ? "—"
+    : String(value);
+}
+function buildChangeDiff(row: any) {
+  let payload: any = {};
+  try {
+    payload =
+      typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload || {};
+  } catch {
+    payload = {};
+  }
+  const current: Record<string, any> = {
+    code: row.currentCode,
+    name: row.currentName,
+    categoryId: row.currentCategoryId,
+    labId: row.currentLabId,
+    brandModel: row.currentBrandModel,
+    location: row.currentLocation,
+    description: row.currentDescription,
+    usageRules: row.currentUsageRules,
+    imageUrl: row.currentImageUrl,
+    purchaseDate: row.currentPurchaseDate,
+    status: row.currentStatus,
+  };
+  return equipmentChangeFields
+    .filter(([field]) => String(payload[field] ?? "") !== String(current[field] ?? ""))
+    .map(([field, label]) => ({
+      label,
+      from: changeValue(field, current[field]),
+      to: changeValue(field, payload[field]),
+    }));
+}
+async function reviewChange(row: any, decision: string) {
+  const { value } = await ElMessageBox.prompt(
+    decision === "APPROVED" ? "审批通过后变更立即生效。" : "驳回后变更不会生效。",
+    decision === "APPROVED" ? "通过设备变更" : "驳回设备变更",
+    { inputType: "textarea", inputPlaceholder: "审批意见（可选）" },
+  );
+  await api.post(`/equipment/change-requests/${row.id}/review`, {
+    decision,
+    comment: value || "",
+  });
+  ElMessage.success(decision === "APPROVED" ? "变更已通过并生效" : "变更已驳回");
+  await refreshChanges();
   await load();
 }
 async function submitAppeal(row: any) {
@@ -501,10 +678,33 @@ function statusType(status: string) {
     )[status] || "info"
   );
 }
+function columnMinWidth(name: string) {
+  if (name === "status") return props.active === "预约管理" && admin.value ? 190 : 125;
+  if (name === "purpose") return 110;
+  if (name === "equipment_name") return 115;
+  return 125;
+}
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"']/g, (c) => {
+    const map: Record<string, string> = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    };
+    return map[c];
+  });
+}
 function displayValue(row: any, field: string) {
   if (field === "reject_reason") return rejectReasonLabel(row[field]);
   if (field === "fulfillment_status") return fulfillmentLabel(row[field]);
-  if (field === "detail" && typeof row[field] === "object") return JSON.stringify(row[field]);
+  if (field === "role") return roleLabel(row[field]);
+  if (field === "personType") return personTypeLabel(row[field]);
+  if (field === "active") return row[field] ? "是" : "否";
+  if (field === "action") return operationLabel(row[field]);
+  if (field === "target_type") return targetTypeLabel(row[field]);
+  if (field === "detail") return formatAuditDetail(row[field]);
   return dateTimeFields.has(field)
     ? formatDateTime(row[field])
     : (row[field] ?? "—");
@@ -513,19 +713,119 @@ function rejectReasonLabel(reason: string) {
   return ({ APPROVAL_TIMEOUT: "超时拒绝", ADMIN_REJECTED: "管理员拒绝", AUTO_REJECTED: "自动审批拒绝" } as Record<string, string>)[reason] || (reason ? reason : "—");
 }
 function fulfillmentLabel(stage: string) {
-  return ({ NOT_STARTED: "待登记", OVERDUE_NOT_RETURNED: "逾期未归还", NOT_FULFILLED: "未履约", RETURNED: "已归还" } as Record<string, string>)[stage] || "—";
+  return ({ NOT_STARTED: "待登记", OVERDUE_NOT_RETURNED: "逾期未归还", NOT_FULFILLED: "未履约", RETURNED: "已归还", COMPLETED: "已完成" } as Record<string, string>)[stage] || "—";
+}
+function personTypeLabel(type: string) {
+  return ({ STUDENT: "学生", STAFF: "教职工" } as Record<string, string>)[type] || type || "—";
+}
+function operationLabel(action: string) {
+  return ({
+    EQUIPMENT_CREATE: "新增设备",
+    EQUIPMENT_UPDATE: "修改设备档案",
+    EQUIPMENT_CHANGE_SUBMIT: "提交设备变更",
+    EQUIPMENT_CHANGE_REVIEW: "审批设备变更",
+    RESERVATION_REVIEW: "审核预约",
+    RESERVATION_AUTO_REJECT: "自动驳回预约",
+    RESERVATION_APPEAL: "提交履约申诉",
+    RESERVATION_APPEAL_REVIEW: "审核履约申诉",
+    RESERVATION_FULFILLMENT: "登记履约结果",
+    RESERVATION_FULFILLMENT_CORRECTION: "修正履约结果",
+    RESERVATION_REVOKE_APPROVAL: "撤销通过",
+    RESERVATION_REVOKE_AUTO_APPROVAL: "撤销自动通过",
+    REPAIR_PROCESS: "处理维修工单",
+  } as Record<string, string>)[action] || action || "—";
+}
+function targetTypeLabel(type: string) {
+  return ({ reservation: "预约", reservation_appeal: "履约申诉", equipment: "设备", repair_ticket: "维修工单", USER: "用户" } as Record<string, string>)[type] || type || "—";
+}
+const auditKeyLabels: Record<string, string> = {
+  decision: "结果",
+  status: "状态",
+  stage: "履约阶段",
+  reason: "原因",
+  imageUrl: "图片",
+  from: "原状态",
+  to: "新状态",
+  comment: "意见",
+  code: "设备编号",
+  requestId: "申请编号",
+  note: "备注",
+  username: "账号",
+  reviewer: "操作人",
+};
+function auditValueLabel(value: string) {
+  return ({
+    APPROVED: "通过",
+    REJECTED: "驳回",
+    AVAILABLE: "可预约",
+    MAINTENANCE: "维修中",
+    DISABLED: "停用",
+    NOT_FULFILLED: "未履约",
+    OVERDUE_NOT_RETURNED: "逾期未归还",
+    RETURNED: "已归还",
+    NOT_STARTED: "未登记",
+    PENDING: "待审批",
+    OPEN: "待处理",
+    PROCESSING: "处理中",
+    WAIT_ACCEPTANCE: "待验收",
+    COMPLETED: "已完成",
+  } as Record<string, string>)[value] || value;
+}
+function formatAuditDetail(detail: any) {
+  if (detail === null || detail === undefined || detail === "") return "—";
+  let data = detail;
+  if (typeof detail === "string") {
+    try {
+      data = JSON.parse(detail);
+    } catch {
+      return detail;
+    }
+  }
+  if (typeof data !== "object") return String(data);
+  return Object.entries(data)
+    .map(
+      ([key, value]) =>
+        `${auditKeyLabels[key] || key}：${
+          typeof value === "string" ? auditValueLabel(value) : String(value)
+        }`,
+    )
+    .join("；");
 }
 function statusLabel(status: string, row?: any) {
-  if (!manager.value && row?.fulfillment_status && row.fulfillment_status !== "NOT_STARTED" && row.fulfillment_status !== "RETURNED") {
+  if (row?.fulfillment_status && row.fulfillment_status !== "NOT_STARTED" && row.fulfillment_status !== "RETURNED") {
     return fulfillmentLabel(row.fulfillment_status);
   }
-  const labels: Record<string, string> = { PENDING: "待审批", APPROVED: manager.value ? "已通过" : "待使用", REJECTED: "已驳回", CANCELLED: "已取消", COMPLETED: "已完成" };
+  const labels: Record<string, string> = {
+    PENDING: "待审批",
+    APPROVED: manager.value ? "已通过" : "待使用",
+    REJECTED: "已驳回",
+    CANCELLED: "已取消",
+    COMPLETED: "已完成",
+    AVAILABLE: "可预约",
+    MAINTENANCE: "维修中",
+    DISABLED: "停用",
+    OPEN: "待处理",
+    PROCESSING: "处理中",
+    WAIT_ACCEPTANCE: "待验收",
+    NOT_STARTED: "待登记",
+    RETURNED: "已归还",
+    NOT_FULFILLED: "未履约",
+    OVERDUE_NOT_RETURNED: "逾期未归还",
+  };
   return labels[status] || status || "—";
 }
 function reservationEnded(row: any) {
   if (!row.ends_at) return false;
   const end = new Date(`${String(row.ends_at).replace(" ", "T")}Z`);
   return !Number.isNaN(end.getTime()) && end.getTime() <= Date.now();
+}
+function canRevoke(row: any) {
+  if (!row?.starts_at) return false;
+  const start = new Date(`${String(row.starts_at).replace(" ", "T")}Z`);
+  return (
+    !Number.isNaN(start.getTime()) &&
+    Date.now() < start.getTime() - 2 * 60 * 60 * 1000
+  );
 }
 function cutoff(row: any) {
   if (!row.starts_at) return "—";
@@ -755,8 +1055,13 @@ onMounted(async () => {
               ><template #default="s">{{
                 formatDateTime(s.row.ends_at)
               }}</template></el-table-column
-            ><el-table-column prop="status" label="状态"
-          /></el-table>
+            ><el-table-column label="状态"
+              ><template #default="s"
+                ><el-tag :type="statusType(s.row.status)">{{
+                  statusLabel(s.row.status, s.row)
+                }}</el-tag></template
+              ></el-table-column
+            ></el-table>
         </div>
         <div class="data-section">
           <div class="section-title">
@@ -834,6 +1139,73 @@ onMounted(async () => {
         <div v-if="sysadmin" class="profile-note">系统管理员不能自行注销，以避免系统失去管理权限。</div>
       </div></template
     >
+    <template v-else-if="active === '履约申诉'">
+      <div class="page-heading">
+        <div>
+          <div class="eyebrow">APPEALS</div>
+          <h1>履约申诉</h1>
+          <p>审核学生提交的履约申诉 · 时间按{{ currentTimeZone }}显示</p>
+        </div>
+        <el-button @click="load">刷新</el-button>
+      </div>
+      <div v-if="admin" class="notice-strip">
+        申诉通过后返还本次登记扣除的全部信誉积分，并把履约状态改为“已完成”；驳回则保留原来的履约结果。
+      </div>
+      <div v-else class="notice-strip">
+        只读管理员可以查看待处理申诉，但不能审核。
+      </div>
+      <div class="data-section">
+        <el-table
+          v-loading="busy"
+          :data="appeals"
+          stripe
+          empty-text="暂无待处理申诉"
+        >
+          <el-table-column prop="applicant_name" label="申诉人" min-width="100" />
+          <el-table-column label="违约情况" min-width="220"
+            ><template #default="s"
+              >{{ fulfillmentLabel(s.row.fulfillment_status) }}：{{
+                s.row.fulfillment_reason || "—"
+              }}</template
+            ></el-table-column
+          >
+          <el-table-column prop="equipment_name" label="设备" min-width="140" />
+          <el-table-column label="证据图片" width="110"
+            ><template #default="s"
+              ><a
+                v-if="s.row.image_url"
+                :href="s.row.image_url"
+                target="_blank"
+                rel="noreferrer"
+                >查看图片</a
+              ><span v-else>未上传</span></template
+            ></el-table-column
+          >
+          <el-table-column prop="reason" label="申诉理由" min-width="260" />
+          <el-table-column label="提交时间" width="150"
+            ><template #default="s">{{
+              formatDateTime(s.row.created_at)
+            }}</template></el-table-column
+          >
+          <el-table-column v-if="admin" label="操作" width="150" fixed="right">
+            <template #default="s">
+              <el-button
+                link
+                type="success"
+                @click="reviewAppeal(s.row, 'APPROVED')"
+                >通过</el-button
+              >
+              <el-button
+                link
+                type="danger"
+                @click="reviewAppeal(s.row, 'REJECTED')"
+                >驳回</el-button
+              >
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+    </template>
     <template v-else
       ><div class="page-heading">
         <div>
@@ -866,6 +1238,10 @@ onMounted(async () => {
             type="primary"
             @click="open()"
             >新增设备</el-button
+          ><el-button
+            v-if="active === '设备档案' && sysadmin"
+            @click="openChanges"
+            >变更审批</el-button
           ><el-button
             v-if="active === '预约管理' && !manager"
             type="primary"
@@ -915,7 +1291,10 @@ onMounted(async () => {
         </div>
       </div>
       <div v-if="active === '预约管理' && admin" class="notice-strip">
-        预约开始前 2 小时仍未处理时，系统将自动驳回。请在截止时间前完成审批。
+        预约开始前 2 小时仍未处理时，系统将自动驳回；已通过的预约也必须在开始前 2 小时以前撤销通过。请在截止时间前完成审批。
+      </div>
+      <div v-if="active === '设备档案' && auth.user?.role === 'LAB_ADMIN'" class="notice-strip">
+        您只能修改自己负责实验室（{{ manageableLabNames.join("、") || "暂未分配" }}）的设备档案，其他实验室的设备仅供查看；责任人只能由系统管理员修改。
       </div>
       <div class="data-section">
         <el-table v-loading="busy" :data="rows" stripe empty-text="暂无数据"
@@ -924,12 +1303,21 @@ onMounted(async () => {
             :key="column[0]"
             :prop="column[0]"
             :label="column[1]"
-            min-width="125"
+            :min-width="columnMinWidth(column[0])"
             ><template #default="scope"
-              ><el-tag
-                v-if="column[0] === 'status'"
-                :type="statusType(scope.row.fulfillment_status && scope.row.fulfillment_status !== 'NOT_STARTED' && scope.row.fulfillment_status !== 'RETURNED' ? scope.row.fulfillment_status : scope.row[column[0]])"
-                >{{ statusLabel(scope.row[column[0]], scope.row) }}</el-tag
+              ><template v-if="column[0] === 'status'"
+                ><div class="status-cell"
+                  ><el-tag
+                    :type="statusType(scope.row.fulfillment_status && scope.row.fulfillment_status !== 'NOT_STARTED' && scope.row.fulfillment_status !== 'RETURNED' ? scope.row.fulfillment_status : scope.row[column[0]])"
+                    >{{ statusLabel(scope.row[column[0]], scope.row) }}</el-tag
+                  ><el-tag
+                    v-if="active === '预约管理' && admin && Number(scope.row.auto_credit_approved) === 1"
+                    class="auto-source-tag"
+                    size="small"
+                    type="warning"
+                    >信誉自动通过</el-tag
+                  ></div
+                ></template
               ><span v-else-if="column[0] === 'enabled'">{{
                 scope.row[column[0]] ? "是" : "否"
               }}</span
@@ -938,23 +1326,39 @@ onMounted(async () => {
               }}</span></template
             ></el-table-column
           ><el-table-column
+            v-if="active === '设备档案' && manager"
+            label="变更审批"
+            min-width="110"
+            ><template #default="s"
+              ><el-tag
+                v-if="Number(s.row.changePending) === 1"
+                size="small"
+                type="warning"
+                >待审批</el-tag
+              ><span v-else>—</span></template
+            ></el-table-column
+          ><el-table-column
             v-if="active === '预约管理' && admin"
             label="审批截止时间"
-            min-width="170"
+            min-width="140"
             ><template #default="s">{{
               cutoff(s.row)
             }}</template></el-table-column
           ><el-table-column
             v-if="active === '预约管理' && admin"
             label="预约人联系方式"
-            min-width="220"
+            min-width="180"
             ><template #default="s"
               ><span
                 >{{ s.row.user_name }} · {{ s.row.user_phone || "无电话" }} ·
                 {{ s.row.user_email || "无邮箱" }}</span
               ></template
             ></el-table-column
-          ><el-table-column label="操作" fixed="right" width="260"
+          ><el-table-column
+            v-if="active !== '操作审计'"
+            label="操作"
+            fixed="right"
+            width="220"
             ><template #default="scope"
               ><template v-if="active === '预约管理'"
                 ><el-button
@@ -964,7 +1368,20 @@ onMounted(async () => {
                   @click="viewRejectReason(scope.row)"
                   >查看拒绝原因</el-button
                 ><el-button
-                  v-if="admin && scope.row.fulfillment_operator_id != null && Number(scope.row.fulfillment_operator_id) === Number(auth.user?.id) && scope.row.fulfillment_status !== 'NOT_STARTED'"
+                  v-if="admin && scope.row.status === 'APPROVED' && canRevoke(scope.row)"
+                  link
+                  type="warning"
+                  @click="revokeApproval(scope.row)"
+                  >撤销通过</el-button
+                ><el-tooltip
+                  v-if="admin && scope.row.status === 'APPROVED' && !canRevoke(scope.row)"
+                  content="距离预约开始不足 2 小时，不能撤销通过"
+                  placement="top"
+                  ><span
+                    ><el-button link disabled>撤销通过</el-button></span
+                  ></el-tooltip
+                ><el-button
+                  v-if="admin && scope.row.fulfillment_operator_id != null && Number(scope.row.fulfillment_operator_id) === Number(auth.user?.id) && scope.row.fulfillment_status !== 'NOT_STARTED' && scope.row.appeal_status !== 'APPROVED'"
                   link
                   type="primary"
                   @click="editFulfillment(scope.row)"
@@ -988,7 +1405,7 @@ onMounted(async () => {
                   @click="markFulfillment(scope.row)"
                   >登记履约</el-button
                 ><el-button
-                  v-if="!manager && ['OVERDUE_NOT_RETURNED', 'NOT_FULFILLED'].includes(scope.row.fulfillment_status) && scope.row.appeal_status !== 'PENDING'"
+                  v-if="!manager && ['OVERDUE_NOT_RETURNED', 'NOT_FULFILLED'].includes(scope.row.fulfillment_status) && !scope.row.appeal_status"
                   link
                   type="warning"
                   @click="submitAppeal(scope.row)"
@@ -1023,7 +1440,10 @@ onMounted(async () => {
                 >标为已读</el-button
               ><el-button
                 v-if="
-                  (active === '设备档案' && admin) ||
+                  (active === '设备档案' &&
+                    admin &&
+                    (sysadmin ||
+                      manageableLabIds.includes(Number(scope.row.labId)))) ||
                   (active === '用户管理' && sysadmin) ||
                   (active === '校园身份' && sysadmin) ||
                   (active === '实验室与分类' && sysadmin)
@@ -1032,29 +1452,20 @@ onMounted(async () => {
                 type="primary"
                 @click="open(scope.row)"
                 >编辑</el-button
+              ><el-tooltip
+                v-if="
+                  active === '设备档案' &&
+                  auth.user?.role === 'LAB_ADMIN' &&
+                  !manageableLabIds.includes(Number(scope.row.labId))
+                "
+                content="只能编辑自己负责实验室的设备"
+                placement="top"
+                ><span class="action-gap"
+                  ><el-button link disabled>编辑</el-button></span
+                ></el-tooltip
               ></template
             ></el-table-column
           ></el-table
-          ><template v-if="active === '预约管理' && admin"
-            ><div class="section-title reservation-appeals-title">
-              <div>
-                <h3>待处理履约申诉</h3>
-                <span>申诉通过后返还本次登记扣除的全部信誉积分</span>
-              </div>
-            </div>
-            <el-table :data="appeals" empty-text="暂无待处理申诉" stripe>
-              <el-table-column prop="applicant_name" label="申诉人" />
-              <el-table-column label="违约情况" min-width="200"><template #default="s">{{ fulfillmentLabel(s.row.fulfillment_status) }}：{{ s.row.fulfillment_reason || "—" }}</template></el-table-column>
-              <el-table-column prop="equipment_name" label="设备" />
-              <el-table-column label="证据图片" width="110"><template #default="s"><a v-if="s.row.image_url" :href="s.row.image_url" target="_blank" rel="noreferrer">查看图片</a><span v-else>未上传</span></template></el-table-column>
-              <el-table-column prop="reason" label="申诉理由" min-width="240" />
-              <el-table-column label="操作" width="180" fixed="right">
-                <template #default="s">
-                  <el-button link type="success" @click="reviewAppeal(s.row, 'APPROVED')">通过</el-button>
-                  <el-button link type="danger" @click="reviewAppeal(s.row, 'REJECTED')">驳回</el-button>
-                </template>
-              </el-table-column>
-            </el-table></template
         ><el-pagination
           v-if="active === '设备档案'"
           v-model:current-page="page"
@@ -1083,7 +1494,7 @@ onMounted(async () => {
             ><el-form-item label="所属实验室"
               ><el-select v-model="form.labId"
                 ><el-option
-                  v-for="x in labs"
+                  v-for="x in editableLabs"
                   :key="x.id"
                   :label="x.name"
                   :value="x.id" /></el-select></el-form-item
@@ -1092,7 +1503,7 @@ onMounted(async () => {
             ><el-form-item label="存放位置"
               ><el-input v-model="form.location" /></el-form-item
             ><el-form-item label="责任人"
-              ><el-select v-model="form.ownerId" clearable
+              ><el-select v-model="form.ownerId" clearable :disabled="!sysadmin"
                 ><el-option
                   v-for="x in userOptions"
                   :key="x.id"
@@ -1104,6 +1515,9 @@ onMounted(async () => {
                 type="date"
                 value-format="YYYY-MM-DD"
             /></el-form-item>
+          </div>
+          <div v-if="!sysadmin" class="upload-tip">
+            责任人只能由系统管理员修改；实验室管理员提交的其他档案修改需系统管理员审批后才会生效。
           </div>
           <el-form-item label="设备说明"
             ><el-input
@@ -1309,6 +1723,68 @@ onMounted(async () => {
       <template #footer><el-button @click="appealDialog = false">取消</el-button><el-button type="primary" @click="saveAppeal">提交申诉</el-button></template>
     </el-dialog>
 
+    <el-dialog v-model="cancelDialog" title="取消预约" width="500px">
+      <template v-if="cancelRow && cancelInfo">
+        <el-descriptions :column="1" border>
+          <el-descriptions-item label="设备">{{ cancelRow.equipment_name }}</el-descriptions-item>
+          <el-descriptions-item label="使用时间">{{ formatDateTime(cancelRow.starts_at) }} 至 {{ formatDateTime(cancelRow.ends_at) }}</el-descriptions-item>
+          <el-descriptions-item label="距开始">{{ cancelInfo.hoursUntilStart }} 小时</el-descriptions-item>
+          <el-descriptions-item label="信誉积分影响">
+            <span v-if="Number(cancelInfo.penalty) > 0" class="cancel-penalty">将扣除 {{ cancelInfo.penalty }} 分</span>
+            <span v-else>暂不扣除（预约尚未通过审批）</span>
+          </el-descriptions-item>
+        </el-descriptions>
+        <div class="upload-tip cancel-tip">取消后无法恢复；扣分按当前时间计算，确认取消后立即生效。</div>
+      </template>
+      <template #footer>
+        <el-button plain @click="cancelRuleDialog = true">退约规则</el-button>
+        <el-button @click="cancelDialog = false">再想想</el-button>
+        <el-button type="danger" @click="confirmCancel">确认取消</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="cancelRuleDialog" title="退约规则" width="500px">
+      <el-table :data="cancelRules" border>
+        <el-table-column prop="window" label="取消时间" />
+        <el-table-column prop="penalty" label="扣除信誉积分" width="130" />
+      </el-table>
+      <div class="upload-tip cancel-tip">规则只对已通过审批的预约生效，待审批预约取消不扣分；信誉积分最低扣至 0 分。申诉通过后可返还相应积分。</div>
+      <template #footer><el-button type="primary" @click="cancelRuleDialog = false">知道了</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-model="changeDialog" title="设备档案变更审批" width="900px">
+      <el-table :data="changeRows" empty-text="暂无待审批的设备变更" stripe>
+        <el-table-column prop="currentCode" label="设备编号" width="110" />
+        <el-table-column label="设备" min-width="150"
+          ><template #default="s"
+            >{{ s.row.currentName }}（{{ s.row.laboratory }}）</template
+          ></el-table-column
+        >
+        <el-table-column prop="applicant_name" label="申请人" width="100" />
+        <el-table-column label="变更内容" min-width="300"
+          ><template #default="s">
+            <div v-for="item in s.row.diff" :key="item.label" class="change-line">
+              <b>{{ item.label }}</b>：{{ item.from }} → {{ item.to }}
+            </div>
+            <span v-if="!s.row.diff?.length">无字段变化</span>
+          </template></el-table-column
+        >
+        <el-table-column label="提交时间" width="150"
+          ><template #default="s">{{
+            formatDateTime(s.row.created_at)
+          }}</template></el-table-column
+        >
+        <el-table-column label="操作" width="130" fixed="right">
+          <template #default="s">
+            <el-button link type="success" @click="reviewChange(s.row, 'APPROVED')">通过</el-button>
+            <el-button link type="danger" @click="reviewChange(s.row, 'REJECTED')">驳回</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div class="upload-tip cancel-tip">实验室管理员提交的变更需在这里审批，通过后立即写入设备档案；责任人只能由系统管理员直接修改。</div>
+      <template #footer><el-button @click="changeDialog = false">关闭</el-button></template>
+    </el-dialog>
+
     <el-dialog v-model="showAutoApproval" title="自动审批规则" width="520px"
       ><el-form label-position="top"
         ><el-form-item label="自动审批范围"
@@ -1422,7 +1898,7 @@ onMounted(async () => {
             detail.ticket?.equipment_name
           }}</el-descriptions-item
           ><el-descriptions-item label="状态">{{
-            detail.ticket?.status
+            statusLabel(detail.ticket?.status)
           }}</el-descriptions-item
           ><el-descriptions-item label="故障类型">{{
             detail.ticket?.fault_type
@@ -1441,7 +1917,7 @@ onMounted(async () => {
             v-for="record in detail.records"
             :key="record.id"
             :timestamp="formatDateTime(record.created_at)"
-            >{{ record.status }} ·
+            >{{ statusLabel(record.status) }} ·
             {{ record.note || "无备注" }}</el-timeline-item
           ></el-timeline
         ></template
