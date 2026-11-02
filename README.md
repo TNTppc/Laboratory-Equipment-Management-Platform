@@ -22,9 +22,10 @@ mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/r
 mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/identity-and-approval-migration.sql
 mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/credit-and-auto-approval-migration.sql
 mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/fulfillment-accountability-migration.sql
+mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/appeal-evidence-migration.sql
 ```
 
-输入 MySQL root 密码后，第一个脚本创建数据库和基础演示数据；第二个脚本按设备编号补充设备档案；第三个脚本用于旧数据库时区修复；第四个脚本为旧数据库补充校园身份、必填联系方式、只读管理员和临时自动审批配置；第五个脚本补充信誉积分、履约、申诉和分范围自动审批规则。迁移脚本可重复执行，不要在已有数据库上重新执行 `schema.sql`。全库时间字段统一保存 UTC，前端按当前电脑时区展示，实验室开放时间按 `Asia/Shanghai` 校验。
+输入 MySQL root 密码后，第一个脚本创建数据库和基础演示数据；第二个脚本按设备编号补充设备档案；第三个脚本用于旧数据库时区修复；第四个脚本为旧数据库补充校园身份、必填联系方式、只读管理员和临时自动审批配置；第五个脚本补充信誉积分、履约、申诉和分范围自动审批规则；第六个脚本为申诉证据图片增加存储字段。迁移脚本可重复执行，不要在已有数据库上重新执行 `schema.sql`。全库时间字段统一保存 UTC，前端按当前电脑时区展示，实验室开放时间按 `Asia/Shanghai` 校验。
 
 ## 配置与启动
 

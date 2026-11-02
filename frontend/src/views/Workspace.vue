@@ -43,6 +43,11 @@ const busy = ref(false),
   fulfillmentReason = ref(""),
   fulfillmentImageUrl = ref(""),
   fulfillmentEdit = ref(false),
+  appealDialog = ref(false),
+  appealRow = ref<any>(null),
+  appealReason = ref(""),
+  appealImageUrl = ref(""),
+  appealFiles = ref<UploadFile[]>([]),
   auditRows = ref<any[]>([]);
 const autoScopeType = ref("LAB"),
   autoScopeId = ref<number | null>(null),
@@ -353,9 +358,23 @@ async function showDetail(row: any) {
   detailDialog.value = true;
 }
 async function review(row: any, decision: string) {
+  const esc = (s: string | undefined | null) =>
+    String(s ?? "").replace(/[&<>"']/g, (c) => {
+      const map: Record<string, string> = {
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      };
+      return map[c];
+    });
   const { value } = await ElMessageBox.prompt(
-    `预约人：${row.user_name}\n电话：${row.user_phone || "未填写"}\n邮箱：${row.user_email || "未填写"}\n填写审核意见`,
+    `预约人：${row.user_name}<br/>电话：${row.user_phone || "未填写"}<br/>邮箱：${row.user_email || "未填写"}<br/>填写审核意见`,
     "预约审核",
+    {
+      dangerouslyUseHTMLString: true,
+    }
   );
   await api.post(`/reservations/${row.id}/review`, {
     decision,
@@ -369,14 +388,32 @@ async function cancel(row: any) {
   await load();
 }
 async function submitAppeal(row: any) {
-  const { value } = await ElMessageBox.prompt(
-    "请说明实际履约情况，管理员审核后将决定是否恢复被扣除的信誉积分。",
-    "申请预约履约申诉",
-    { inputType: "textarea", inputPlaceholder: "申诉理由", inputValidator: value => !!value?.trim() || "请填写申诉理由" },
-  );
-  await api.post(`/reservations/${row.id}/appeal`, { reason: value });
+  appealRow.value = row;
+  appealReason.value = "";
+  appealImageUrl.value = "";
+  appealFiles.value = [];
+  appealDialog.value = true;
+}
+async function saveAppeal() {
+  if (!appealReason.value.trim()) return ElMessage.warning("请填写申诉理由");
+  await api.post(`/reservations/${appealRow.value.id}/appeal`, {
+    reason: appealReason.value,
+    imageUrl: appealImageUrl.value,
+  });
+  appealDialog.value = false;
   ElMessage.success("申诉已提交");
   await load();
+}
+async function uploadAppealImage(options: UploadRequestOptions) {
+  try {
+    const result: any = await api.upload("/uploads/repair-image", options.file);
+    appealImageUrl.value = result.url;
+    options.onSuccess(result);
+  } catch (error) { options.onError(error as any); }
+}
+function removeAppealImage(_file: UploadFile, files: UploadFiles) {
+  appealFiles.value = files;
+  if (!files.length) appealImageUrl.value = "";
 }
 async function markFulfillment(row: any) {
   fulfillmentRow.value = row;
@@ -412,7 +449,7 @@ async function uploadFulfillmentImage(options: UploadRequestOptions) {
   } catch (error) { options.onError(error as any); }
 }
 function viewRejectReason(row: any) {
-  const labels: Record<string, string> = { APPROVAL_TIMEOUT: "超过审批时限，系统自动驳回", ADMIN_REJECTED: row.review_comment || "管理员驳回", AUTO_REJECTED: row.review_comment || "命中自动审批拒绝规则" };
+  const labels: Record<string, string> = { APPROVAL_TIMEOUT: "超过审批时限，系统自动驳回", ADMIN_REJECTED: "管理员审核意见："+row.review_comment || "管理员驳回", AUTO_REJECTED: row.review_comment || "命中自动审批拒绝规则" };
   ElMessageBox.alert(labels[row.reject_reason] || row.review_comment || "系统未提供详细原因", "拒绝原因");
 }
 async function reviewAppeal(row: any, decision: string) {
@@ -453,6 +490,8 @@ function statusType(status: string) {
         PENDING: "warning",
         APPROVED: "success",
         REJECTED: "danger",
+        OVERDUE_NOT_RETURNED: "danger",
+        NOT_FULFILLED: "danger",
         CANCELLED: "info",
         OPEN: "warning",
         PROCESSING: "primary",
@@ -476,8 +515,17 @@ function rejectReasonLabel(reason: string) {
 function fulfillmentLabel(stage: string) {
   return ({ NOT_STARTED: "待登记", OVERDUE_NOT_RETURNED: "逾期未归还", NOT_FULFILLED: "未履约", RETURNED: "已归还" } as Record<string, string>)[stage] || "—";
 }
-function statusLabel(status: string) {
-  return ({ PENDING: "待审批", APPROVED: "已通过", REJECTED: "已驳回", CANCELLED: "已取消", COMPLETED: "已完成" } as Record<string, string>)[status] || status || "—";
+function statusLabel(status: string, row?: any) {
+  if (!manager.value && row?.fulfillment_status && row.fulfillment_status !== "NOT_STARTED" && row.fulfillment_status !== "RETURNED") {
+    return fulfillmentLabel(row.fulfillment_status);
+  }
+  const labels: Record<string, string> = { PENDING: "待审批", APPROVED: manager.value ? "已通过" : "待使用", REJECTED: "已驳回", CANCELLED: "已取消", COMPLETED: "已完成" };
+  return labels[status] || status || "—";
+}
+function reservationEnded(row: any) {
+  if (!row.ends_at) return false;
+  const end = new Date(`${String(row.ends_at).replace(" ", "T")}Z`);
+  return !Number.isNaN(end.getTime()) && end.getTime() <= Date.now();
 }
 function cutoff(row: any) {
   if (!row.starts_at) return "—";
@@ -553,23 +601,44 @@ function disableBookingDate(date: Date) {
   max.setDate(max.getDate() + 7);
   return date < min || date > max;
 }
-function bookingShortcuts(_field: "startsAt" | "endsAt") {
-  return [{
-    text: "最早可预约时间",
+function quickBookingDays() {
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = new Date();
+    date.setHours(0, 0, 0, 0);
+    date.setDate(date.getDate() + index + 1);
+    return date;
+  });
+}
+function quickBookingLabel(date: Date) {
+  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", weekday: "short" }).format(date);
+}
+function quickBookingShortcuts() {
+  return quickBookingDays().map(date => ({
+    text: quickBookingLabel(date),
     value: () => {
-      const start = new Date();
-      start.setDate(start.getDate() + 1);
-      start.setHours(8, 0, 0, 0);
-      const end = new Date(start.getTime() + 60 * 60 * 1000);
-      const inputValue = (value: Date) => {
-        const pad = (n: number) => String(n).padStart(2, "0");
-        return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}T${pad(value.getHours())}:${pad(value.getMinutes())}:00`;
-      };
-      form.value.startsAt = inputValue(start);
-      form.value.endsAt = inputValue(end);
-      return start;
+      applyQuickBooking(date);
+      return new Date(form.value.startsAt);
     },
-  }];
+  }));
+}
+function localInputAtLabOpening(date: Date, time: string) {
+  const [hour, minute] = String(time || "08:00:00").split(":").map(Number);
+  const instant = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate(), hour - 8, minute));
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(instant);
+  const part = (type: string) => parts.find(item => item.type === type)?.value || "00";
+  return `${part("year")}-${part("month")}-${part("day")}T${part("hour")}:${part("minute")}:00`;
+}
+function applyQuickBooking(date: Date) {
+  const selected = equipment.value.find(item => Number(item.id) === Number(form.value.equipmentId));
+  if (!selected) return ElMessage.warning("请先选择设备");
+  const start = localInputAtLabOpening(date, selected.open_time);
+  const endDate = new Date(new Date(start).getTime() + 60 * 60 * 1000);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  form.value.startsAt = start;
+  form.value.endsAt = `${endDate.getFullYear()}-${pad(endDate.getMonth() + 1)}-${pad(endDate.getDate())}T${pad(endDate.getHours())}:${pad(endDate.getMinutes())}:00`;
 }
 async function loadContacts() {
   contacts.value = await api.get("/auth/contacts");
@@ -859,8 +928,8 @@ onMounted(async () => {
             ><template #default="scope"
               ><el-tag
                 v-if="column[0] === 'status'"
-                :type="statusType(scope.row[column[0]])"
-                >{{ statusLabel(scope.row[column[0]]) }}</el-tag
+                :type="statusType(scope.row.fulfillment_status && scope.row.fulfillment_status !== 'NOT_STARTED' && scope.row.fulfillment_status !== 'RETURNED' ? scope.row.fulfillment_status : scope.row[column[0]])"
+                >{{ statusLabel(scope.row[column[0]], scope.row) }}</el-tag
               ><span v-else-if="column[0] === 'enabled'">{{
                 scope.row[column[0]] ? "是" : "否"
               }}</span
@@ -913,7 +982,7 @@ onMounted(async () => {
                   @click="review(scope.row, 'REJECTED')"
                   >驳回</el-button
                 ><el-button
-                  v-if="admin && ['APPROVED', 'COMPLETED'].includes(scope.row.status) && scope.row.fulfillment_status === 'NOT_STARTED'"
+                  v-if="admin && ['APPROVED', 'COMPLETED'].includes(scope.row.status) && scope.row.fulfillment_status === 'NOT_STARTED' && reservationEnded(scope.row)"
                   link
                   type="primary"
                   @click="markFulfillment(scope.row)"
@@ -970,12 +1039,14 @@ onMounted(async () => {
             ><div class="section-title reservation-appeals-title">
               <div>
                 <h3>待处理履约申诉</h3>
-                <span>申诉通过后按违约类型恢复 1 或 2 分信誉积分</span>
+                <span>申诉通过后返还本次登记扣除的全部信誉积分</span>
               </div>
             </div>
             <el-table :data="appeals" empty-text="暂无待处理申诉" stripe>
               <el-table-column prop="applicant_name" label="申诉人" />
+              <el-table-column label="违约情况" min-width="200"><template #default="s">{{ fulfillmentLabel(s.row.fulfillment_status) }}：{{ s.row.fulfillment_reason || "—" }}</template></el-table-column>
               <el-table-column prop="equipment_name" label="设备" />
+              <el-table-column label="证据图片" width="110"><template #default="s"><a v-if="s.row.image_url" :href="s.row.image_url" target="_blank" rel="noreferrer">查看图片</a><span v-else>未上传</span></template></el-table-column>
               <el-table-column prop="reason" label="申诉理由" min-width="240" />
               <el-table-column label="操作" width="180" fixed="right">
                 <template #default="s">
@@ -1063,10 +1134,11 @@ onMounted(async () => {
             ><el-date-picker
               v-model="form.startsAt"
               type="datetime"
+              popper-class="reservation-start-picker"
               value-format="YYYY-MM-DDTHH:mm:ss"
               format="YYYY年MM月DD日 HH:mm"
               :show-now="false"
-              :shortcuts="bookingShortcuts('startsAt')"
+              :shortcuts="quickBookingShortcuts()"
               :disabled-date="disableBookingDate" /></el-form-item
           ><el-form-item :label="`结束时间（${currentTimeZone}）`" required
             ><el-date-picker
@@ -1075,7 +1147,6 @@ onMounted(async () => {
               value-format="YYYY-MM-DDTHH:mm:ss"
               format="YYYY年MM月DD日 HH:mm"
               :show-now="false"
-              :shortcuts="bookingShortcuts('endsAt')"
               :disabled-date="disableBookingDate" /></el-form-item
           ><el-form-item label="使用目的" required
             ><el-input v-model="form.purpose" /></el-form-item
@@ -1222,6 +1293,21 @@ onMounted(async () => {
         ><el-button @click="fulfillmentDialog = false">取消</el-button
         ><el-button type="primary" @click="saveFulfillment">确定登记</el-button></template
     ></el-dialog>
+
+    <el-dialog v-model="appealDialog" title="预约履约申诉" width="560px">
+      <template v-if="appealRow">
+        <el-descriptions :column="1" border>
+          <el-descriptions-item label="履约结果">{{ fulfillmentLabel(appealRow.fulfillment_status) }}</el-descriptions-item>
+          <el-descriptions-item label="登记原因">{{ appealRow.fulfillment_reason || "管理员未填写具体原因" }}</el-descriptions-item>
+          <el-descriptions-item label="登记图片"><a v-if="appealRow.fulfillment_image_url" :href="appealRow.fulfillment_image_url" target="_blank" rel="noreferrer">查看管理员登记图片</a><span v-else>未提供</span></el-descriptions-item>
+        </el-descriptions>
+        <el-form label-position="top" class="appeal-form">
+          <el-form-item label="申诉理由" required><el-input v-model="appealReason" type="textarea" :rows="4" maxlength="1000" show-word-limit placeholder="说明实际履约情况" /></el-form-item>
+          <el-form-item label="申诉证据图片"><el-upload v-model:file-list="appealFiles" list-type="picture-card" accept="image/jpeg,image/png,image/webp,image/gif" :limit="1" :http-request="uploadAppealImage" :on-remove="removeAppealImage"><span>上传图片</span><template #tip><div class="upload-tip">如有相关凭证，建议上传清晰、可靠的证据图片；图片为选填，支持 JPG、PNG、WEBP、GIF，最大 5MB。</div></template></el-upload></el-form-item>
+        </el-form>
+      </template>
+      <template #footer><el-button @click="appealDialog = false">取消</el-button><el-button type="primary" @click="saveAppeal">提交申诉</el-button></template>
+    </el-dialog>
 
     <el-dialog v-model="showAutoApproval" title="自动审批规则" width="520px"
       ><el-form label-position="top"

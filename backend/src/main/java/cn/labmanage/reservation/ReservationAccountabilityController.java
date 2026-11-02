@@ -113,14 +113,16 @@ public class ReservationAccountabilityController {
     public ApiResult<?> appeal(@PathVariable long id, @RequestBody Map<String,String> body, Authentication auth) {
         String reason = body.get("reason");
         if (reason == null || reason.isBlank()) throw new BusinessException("请填写申诉理由");
+        String imageUrl = body.getOrDefault("imageUrl", "").trim();
+        if (!imageUrl.isBlank() && !imageUrl.matches("/uploads/[a-zA-Z0-9-]+\\.(jpg|png|webp|gif)")) throw new BusinessException("申诉图片地址无效");
         Long uid = db.queryForObject("SELECT id FROM lab_user WHERE username=?", Long.class, auth.getName());
         Integer count = db.queryForObject("SELECT COUNT(*) FROM reservation WHERE id=? AND user_id=? AND fulfillment_status IN ('OVERDUE_NOT_RETURNED','NOT_FULFILLED')", Integer.class, id, uid);
         if (count == null || count == 0) throw new BusinessException("当前预约不符合申诉条件");
         Integer withinDeadline = db.queryForObject("SELECT COUNT(*) FROM reservation WHERE id=? AND ends_at>=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 7 DAY)", Integer.class, id);
         if (withinDeadline == null || withinDeadline == 0) throw new BusinessException("预约结束超过7天，已无法申诉");
-        int inserted = db.update("INSERT IGNORE INTO reservation_appeal(reservation_id,applicant_id,reason) VALUES(?,?,?)", id, uid, reason);
+        int inserted = db.update("INSERT IGNORE INTO reservation_appeal(reservation_id,applicant_id,reason,image_url) VALUES(?,?,?,?)", id, uid, reason.trim(), imageUrl.isBlank() ? null : imageUrl);
         if (inserted == 0) throw new BusinessException("该预约已经提交过申诉，不能重复提交");
-        db.update("INSERT INTO operation_log(operator_id,action,target_type,target_id,detail) VALUES(?,'RESERVATION_APPEAL','reservation',?,JSON_OBJECT('reason',?))", uid, id, reason);
+        db.update("INSERT INTO operation_log(operator_id,action,target_type,target_id,detail) VALUES(?,'RESERVATION_APPEAL','reservation',?,JSON_OBJECT('reason',?,'imageUrl',?))", uid, id, reason.trim(), imageUrl);
         return ApiResult.ok(Map.of("submitted", true));
     }
 
@@ -136,7 +138,7 @@ public class ReservationAccountabilityController {
     @PreAuthorize("hasAnyRole('LAB_ADMIN','SYS_ADMIN','READ_ONLY_ADMIN')")
     public ApiResult<?> appeals(Authentication auth) {
         String suffix = access.isGlobalViewer(auth) ? "" : " AND EXISTS(SELECT 1 FROM reservation r JOIN equipment e ON e.id=r.equipment_id JOIN lab_admin_lab al ON al.lab_id=e.lab_id JOIN lab_user au ON au.id=al.user_id WHERE r.id=a.reservation_id AND au.username=?)";
-        String sql = "SELECT a.*,u.real_name applicant_name,r.user_id,r.fulfillment_status,e.name equipment_name FROM reservation_appeal a JOIN lab_user u ON u.id=a.applicant_id JOIN reservation r ON r.id=a.reservation_id JOIN equipment e ON e.id=r.equipment_id WHERE a.status='PENDING'" + suffix + " ORDER BY a.created_at";
+        String sql = "SELECT a.*,u.real_name applicant_name,r.user_id,r.fulfillment_status,r.fulfillment_reason,r.fulfillment_image_url,r.fulfillment_penalty,e.name equipment_name FROM reservation_appeal a JOIN lab_user u ON u.id=a.applicant_id JOIN reservation r ON r.id=a.reservation_id JOIN equipment e ON e.id=r.equipment_id WHERE a.status='PENDING'" + suffix + " ORDER BY a.created_at";
         return ApiResult.ok(access.isGlobalViewer(auth) ? db.queryForList(sql) : db.queryForList(sql, auth.getName()));
     }
 
@@ -157,8 +159,8 @@ public class ReservationAccountabilityController {
         String comment = body.getOrDefault("comment", "");
         int changed = db.update("UPDATE reservation_appeal SET status=?,reviewer_id=?,review_comment=?,reviewed_at=UTC_TIMESTAMP() WHERE id=? AND status='PENDING'", decision, reviewer, comment, id);
         if (changed == 1 && "APPROVED".equals(decision)) {
-            var reservation = db.queryForMap("SELECT a.applicant_id,a.reservation_id,r.fulfillment_status FROM reservation_appeal a JOIN reservation r ON r.id=a.reservation_id WHERE a.id=?", id);
-            double delta = "OVERDUE_NOT_RETURNED".equals(reservation.get("fulfillment_status")) ? 2.0 : 1.0;
+            var reservation = db.queryForMap("SELECT a.applicant_id,a.reservation_id,r.fulfillment_status,r.fulfillment_penalty FROM reservation_appeal a JOIN reservation r ON r.id=a.reservation_id WHERE a.id=? FOR UPDATE", id);
+            double delta = number(reservation.get("fulfillment_penalty"));
             int inserted = db.update("INSERT IGNORE INTO credit_ledger(user_id,reservation_id,delta,reason,idempotency_key) VALUES(?,?,?,?,?)", reservation.get("applicant_id"), reservation.get("reservation_id"), delta, "申诉通过返还", "appeal:" + id);
             if (inserted == 1) db.update("UPDATE lab_user SET credit_score=LEAST(100.0,credit_score+?) WHERE id=?", delta, reservation.get("applicant_id"));
         }

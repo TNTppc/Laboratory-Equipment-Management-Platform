@@ -3,6 +3,7 @@ backend/target/
 backend/.m2/
 backend/uploads/
 *.class
+*.log
 
 # Node / Vite
 frontend/node_modules/

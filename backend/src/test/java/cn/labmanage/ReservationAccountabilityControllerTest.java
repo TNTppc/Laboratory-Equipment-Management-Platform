@@ -41,7 +41,8 @@ class ReservationAccountabilityControllerTest {
         when(auth.getName()).thenReturn("student");
         when(db.queryForObject(contains("SELECT id FROM lab_user"), eq(Long.class), eq("student"))).thenReturn(2L);
         when(db.queryForObject(contains("FROM reservation WHERE id=? AND user_id=?"), eq(Integer.class), eq(7L), eq(2L))).thenReturn(1);
-        when(db.update(startsWith("INSERT IGNORE INTO reservation_appeal"), eq(7L), eq(2L), eq("说明"))).thenReturn(0);
+        when(db.queryForObject(contains("ends_at>=DATE_SUB"), eq(Integer.class), eq(7L))).thenReturn(1);
+        when(db.update(startsWith("INSERT IGNORE INTO reservation_appeal"), eq(7L), eq(2L), eq("说明"), isNull())).thenReturn(0);
 
         ReservationAccountabilityController controller = new ReservationAccountabilityController(db, access);
 
@@ -77,12 +78,49 @@ class ReservationAccountabilityControllerTest {
         when(db.queryForObject(contains("SELECT id FROM lab_user"), eq(Long.class), eq("student"))).thenReturn(2L);
         when(db.queryForObject(contains("fulfillment_status IN"), eq(Integer.class), eq(7L), eq(2L))).thenReturn(1);
         when(db.queryForObject(contains("ends_at>=DATE_SUB"), eq(Integer.class), eq(7L))).thenReturn(1);
-        when(db.update(startsWith("INSERT IGNORE INTO reservation_appeal"), eq(7L), eq(2L), eq("说明"))).thenReturn(1);
+        when(db.update(startsWith("INSERT IGNORE INTO reservation_appeal"), eq(7L), eq(2L), eq("说明"), isNull())).thenReturn(1);
 
         ReservationAccountabilityController controller = new ReservationAccountabilityController(db, access);
 
         assertDoesNotThrow(() -> controller.appeal(7L, Map.of("reason", "说明"), auth));
         verify(db).queryForObject(contains("ends_at>=DATE_SUB"), eq(Integer.class), eq(7L));
+    }
+
+    @Test
+    void appealMayIncludeEvidenceImage() {
+        JdbcTemplate db = mock(JdbcTemplate.class);
+        AccessService access = mock(AccessService.class);
+        Authentication auth = mock(Authentication.class);
+        when(auth.getName()).thenReturn("student");
+        when(db.queryForObject(contains("SELECT id FROM lab_user"), eq(Long.class), eq("student"))).thenReturn(2L);
+        when(db.queryForObject(contains("fulfillment_status IN"), eq(Integer.class), eq(7L), eq(2L))).thenReturn(1);
+        when(db.queryForObject(contains("ends_at>=DATE_SUB"), eq(Integer.class), eq(7L))).thenReturn(1);
+        when(db.update(startsWith("INSERT IGNORE INTO reservation_appeal"), eq(7L), eq(2L), eq("\u8bf4\u660e"), eq("/uploads/evidence-1.png"))).thenReturn(1);
+
+        ReservationAccountabilityController controller = new ReservationAccountabilityController(db, access);
+
+        assertDoesNotThrow(() -> controller.appeal(7L, Map.of("reason", "\u8bf4\u660e", "imageUrl", "/uploads/evidence-1.png"), auth));
+        verify(db).update(startsWith("INSERT IGNORE INTO reservation_appeal"), eq(7L), eq(2L), eq("\u8bf4\u660e"), eq("/uploads/evidence-1.png"));
+    }
+
+    @Test
+    void approvingAppealRefundsStoredPenalty() {
+        JdbcTemplate db = mock(JdbcTemplate.class);
+        AccessService access = mock(AccessService.class);
+        Authentication auth = mock(Authentication.class);
+        when(auth.getName()).thenReturn("labadmin");
+        when(db.queryForList(contains("SELECT a.*,r.equipment_id"), eq(12L))).thenReturn(List.of(Map.of("equipment_id", 4L, "status", "PENDING")));
+        when(db.queryForObject(contains("SELECT id FROM lab_user"), eq(Long.class), eq("labadmin"))).thenReturn(3L);
+        when(db.update(startsWith("UPDATE reservation_appeal SET status"), eq("APPROVED"), eq(3L), eq(""), eq(12L))).thenReturn(1);
+        when(db.queryForMap(contains("fulfillment_penalty"), eq(12L))).thenReturn(Map.of("applicant_id", 2L, "reservation_id", 9L, "fulfillment_status", "OVERDUE_NOT_RETURNED", "fulfillment_penalty", 7.0));
+        when(db.update(startsWith("INSERT IGNORE INTO credit_ledger"), eq(2L), eq(9L), eq(7.0), eq("申诉通过返还"), eq("appeal:12"))).thenReturn(1);
+
+        ReservationAccountabilityController controller = new ReservationAccountabilityController(db, access);
+
+        controller.reviewAppeal(12L, Map.of("decision", "APPROVED"), auth);
+
+        verify(db).update(startsWith("INSERT IGNORE INTO credit_ledger"), eq(2L), eq(9L), eq(7.0), eq("申诉通过返还"), eq("appeal:12"));
+        verify(db).update(contains("UPDATE lab_user SET credit_score=LEAST(100.0,credit_score+?)"), eq(7.0), eq(2L));
     }
 
     @Test
