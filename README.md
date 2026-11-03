@@ -11,13 +11,36 @@
 
 安装并确保命令可用：JDK 17、Maven 3.8+、Node.js 20+、npm 10+、MySQL 8。当前工程已在 Java 17、Maven 3.10、Node 24、npm 11、MySQL 8.0 上验证。
 
+## 快速开始（Windows PowerShell 脚本）
+
+仓库自带两个脚本，用于本机一键初始化与启动：
+
+```powershell
+# 1) 首次初始化：检查环境、建库导入演示数据、生成 backend/.env.local、安装依赖并构建后端
+powershell -ExecutionPolicy Bypass -File .\scripts\init.ps1
+
+# 2) 启动前后端（后台运行，等待端口就绪后输出地址）
+powershell -ExecutionPolicy Bypass -File .\scripts\start.ps1
+
+# 3) 停止前后端
+powershell -ExecutionPolicy Bypass -File .\scripts\start.ps1 -Stop
+```
+
+- `init.ps1` 参数：`-DbHost`（默认 `localhost`）、`-DbPort`（`3306`）、`-DbUser`（`root`）、`-DbPassword`、`-JwtSecret`、`-MysqlPath`、`-SkipInstall`、`-SkipBuild`、`-ForceEnv`。未提供 `-DbPassword` 时会安全提示输入；数据库密码和随机 JWT 密钥只写入被 git 忽略的 `backend/.env.local`，不会显示在终端。
+- 已有数据库不会被覆盖：只有 `lab_manage` 不存在或没有任何表时才执行 `schema.sql` + `demo-data.sql`；新库的 `schema.sql` 已包含全部结构，脚本会把历史迁移版本登记为已应用。重复执行是安全的。
+- `start.ps1` 参数：`-Stop` 停止前后端、`-Build` 强制重新构建后端 jar、`-NoFrontend` 只启动后端、`-EnvFile` 指定其他环境变量文件（默认 `backend/.env.local`）。启动日志在 `backend/logs` 与 `frontend/logs`。脚本会校验 jar 是否有 Spring Boot 主清单，损坏或缺失时自动重新构建。
+- 两个脚本需要 Windows PowerShell 5.1+；在其他终端调用时使用 `powershell -ExecutionPolicy Bypass -File ...` 绕过执行策略限制。
+
 ## 初始化数据库
 
 先启动 MySQL 8。Windows PowerShell 示例（按本机安装位置使用 `mysql` 命令）：
 
 ```powershell
+# 全新初始化（只执行一次）
 mysql --default-character-set=utf8mb4 -u root -p < backend/src/main/resources/db/schema.sql
 mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/demo-data.sql
+
+# 已有数据库升级时按顺序执行（可重复执行，已应用版本记录在 app_migration 表）
 mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/timezone-migration.sql
 mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/identity-and-approval-migration.sql
 mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/credit-and-auto-approval-migration.sql
@@ -27,11 +50,11 @@ mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/r
 mysql --default-character-set=utf8mb4 -u root -p lab_manage < backend/src/main/resources/db/equipment-change-approval-migration.sql
 ```
 
-输入 MySQL root 密码后，第一个脚本创建数据库和基础演示数据；第二个脚本按设备编号补充设备档案；第三个脚本用于旧数据库时区修复；第四个脚本为旧数据库补充校园身份、必填联系方式、只读管理员和临时自动审批配置；第五个脚本补充信誉积分、履约、申诉和分范围自动审批规则；第六个脚本为申诉证据图片增加存储字段；第七个脚本补充取消预约扣分依据和“信誉积分自动通过”标记；第八个脚本增加设备档案变更审批表。迁移脚本可重复执行，不要在已有数据库上重新执行 `schema.sql`。全库时间字段统一保存 UTC，前端按当前电脑时区展示，实验室开放时间按 `Asia/Shanghai` 校验。
+`schema.sql` 是最新全量结构（含全部表、字段和演示账号/实验室/设备），只用于全新数据库；`demo-data.sql` 按设备编号补充 12 台演示设备。迁移脚本用于把旧数据库升级到当前结构，可重复执行；新库不需要再执行迁移。不要在已有数据库上重新执行 `schema.sql`。全库时间字段统一保存 UTC，前端按当前电脑时区展示，实验室开放时间按 `Asia/Shanghai` 校验。
 
 ## 配置与启动
 
-复制 `backend/.env.example` 中列出的变量到当前终端环境。Spring Boot 不会自动读取 `.env` 文件，必须在启动进程前设置环境变量。不得将真实密码或生产 JWT 密钥提交到版本库。
+复制 `backend/.env.example` 中列出的变量到当前终端环境。Spring Boot 不会自动读取 `.env` 文件，必须在启动进程前设置环境变量。不得将真实密码或生产 JWT 密钥提交到版本库。使用 `scripts/start.ps1` 时会自动读取 `backend/.env.local`（由 `scripts/init.ps1` 生成）并注入环境变量，等价于下面的手动设置。
 
 后端：
 

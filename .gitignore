@@ -22,6 +22,11 @@ frontend/.env
 frontend/.env.*
 !frontend/.env.example
 
+# Runtime logs and pid files
+backend/logs/
+frontend/logs/
+*.pid
+
 # IDE / OS
 .idea/
 .vscode/
