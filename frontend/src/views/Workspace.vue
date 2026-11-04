@@ -54,7 +54,24 @@ const busy = ref(false),
   cancelInfo = ref<any>({}),
   cancelRuleDialog = ref(false),
   changeDialog = ref(false),
-  changeRows = ref<any[]>([]);
+  changeRows = ref<any[]>([]),
+  trainingCatalog = ref<any[]>([]),
+  trainingItems = ref<any[]>([]),
+  myGrants = ref<any[]>([]),
+  grantRows = ref<any[]>([]),
+  grantFilter = ref("PENDING"),
+  trainingDialog = ref(false),
+  trainingForm = ref<any>({}),
+  trainingEditId = ref<number | null>(null),
+  requirementDialog = ref(false),
+  requirementEquipment = ref<any>(null),
+  requirementIds = ref<number[]>([]),
+  applyDialog = ref(false),
+  applyItem = ref<any>(null),
+  applyRemark = ref(""),
+  applyEvidenceUrl = ref(""),
+  applyFiles = ref<UploadFile[]>([]),
+  reservationAccess = ref<any>(null);
 const autoScopeType = ref("LAB"),
   autoScopeId = ref<number | null>(null),
   autoAction = ref("APPROVE");
@@ -167,6 +184,7 @@ const columns = computed(() =>
         ["category", "分类"],
         ["laboratory", "所属实验室"],
         ["ownerName", "责任人"],
+        ["trainingRequirements", "准入要求"],
         ["status", "状态"],
       ]
     : props.active === "预约管理"
@@ -279,6 +297,7 @@ async function load() {
       ];
     } else if (props.active === "站内通知")
       rows.value = await api.get("/notifications");
+    else if (props.active === "培训与授权") await loadTraining();
     else if (props.active === "个人信息") {
       profile.value = await api.get("/auth/me");
       auth.user = profile.value;
@@ -314,6 +333,7 @@ async function open(row?: any) {
   editId.value = row?.id ?? null;
   form.value = row ? { ...row } : { status: "AVAILABLE", participants: 1 };
   repairFiles.value = [];
+  reservationAccess.value = null;
   if (props.active === "设备档案") {
     const [labData, categoryData, users]: any[] = await Promise.all([
       api.get("/labs"),
@@ -354,6 +374,10 @@ async function save() {
     );
     const startsAt = localInputToUtc(form.value.startsAt);
     const endsAt = localInputToUtc(form.value.endsAt);
+    if (reservationAccess.value?.missing?.length)
+      return ElMessage.warning(
+        `缺少设备准入授权：${reservationAccess.value.missing.map((x: any) => x.name).join("、")}，请先前往“培训与授权”申请`,
+      );
     const result: any = await api.post("/reservations", {
       ...form.value,
       startsAt,
@@ -657,6 +681,187 @@ async function markRead(row: any) {
   await api.post(`/notifications/${row.id}/read`);
   await load();
 }
+async function loadTraining() {
+  const [catalog, mine]: any[] = await Promise.all([
+    api.get("/trainings"),
+    api.get("/trainings/mine"),
+  ]);
+  trainingCatalog.value = catalog;
+  myGrants.value = mine;
+  if (manager.value) {
+    trainingItems.value = await api.get("/trainings/items");
+    await loadGrantRows();
+  }
+}
+async function loadGrantRows() {
+  grantRows.value = await api.get("/trainings/grants", {
+    params: { status: grantFilter.value },
+  });
+}
+function trainingTypeLabel(type: string) {
+  return (
+    ({ SAFETY_TRAINING: "安全培训", OPERATION_EXAM: "仪器操作考试" } as Record<
+      string,
+      string
+    >)[type] ||
+    type ||
+    "—"
+  );
+}
+function grantStatusLabel(status: string) {
+  return (
+    ({
+      PENDING: "待审批",
+      APPROVED: "已授权",
+      REJECTED: "已驳回",
+      REVOKED: "已撤销",
+    } as Record<string, string>)[status] ||
+    status ||
+    "—"
+  );
+}
+function grantSourceLabel(source: string) {
+  return (
+    ({ TRAINING: "培训申请", EXAM: "在线考试", ADMIN: "管理员登记" } as Record<
+      string,
+      string
+    >)[source] ||
+    source ||
+    "—"
+  );
+}
+function grantStateLabel(row: any) {
+  if (row.status === "APPROVED") return Number(row.effective) === 1 ? "有效" : "已过期";
+  return grantStatusLabel(row.status);
+}
+function grantStateType(row: any) {
+  if (row.status === "APPROVED") return Number(row.effective) === 1 ? "success" : "info";
+  return (
+    ({ PENDING: "warning", REJECTED: "danger", REVOKED: "info" } as Record<string, string>)[
+      row.status
+    ] || "info"
+  );
+}
+async function openTraining(row?: any) {
+  trainingEditId.value = row?.id ?? null;
+  trainingForm.value = row
+    ? {
+        code: row.code,
+        name: row.name,
+        type: row.type,
+        labId: row.labId ?? null,
+        validityMonths: row.validityMonths ?? 12,
+        description: row.description || "",
+        enabled: row.enabled ?? true,
+      }
+    : {
+        code: "",
+        name: "",
+        type: "SAFETY_TRAINING",
+        labId: sysadmin.value ? null : manageableLabIds.value[0] ?? null,
+        validityMonths: 12,
+        description: "",
+        enabled: true,
+      };
+  if (!labs.value.length) labs.value = await api.get("/labs");
+  trainingDialog.value = true;
+}
+async function saveTraining() {
+  if (!trainingForm.value.code?.trim() || !trainingForm.value.name?.trim())
+    return ElMessage.warning("请填写培训项目编号和名称");
+  if (trainingEditId.value)
+    await api.put(`/trainings/${trainingEditId.value}`, trainingForm.value);
+  else await api.post("/trainings", trainingForm.value);
+  trainingDialog.value = false;
+  ElMessage.success("培训项目已保存");
+  await loadTraining();
+}
+function applyTraining(row: any) {
+  applyItem.value = row;
+  applyRemark.value = "";
+  applyEvidenceUrl.value = "";
+  applyFiles.value = [];
+  applyDialog.value = true;
+}
+async function submitTrainingApply() {
+  if (!applyRemark.value.trim()) return ElMessage.warning("请填写申请说明");
+  await api.post(`/trainings/${applyItem.value.id}/apply`, {
+    remark: applyRemark.value,
+    evidenceUrl: applyEvidenceUrl.value,
+  });
+  applyDialog.value = false;
+  ElMessage.success("申请已提交，等待管理员审批");
+  await loadTraining();
+}
+async function uploadTrainingEvidence(options: UploadRequestOptions) {
+  try {
+    const result: any = await api.upload("/uploads/training-evidence", options.file);
+    applyEvidenceUrl.value = result.url;
+    options.onSuccess(result);
+  } catch (error) {
+    options.onError(error as any);
+  }
+}
+function removeTrainingEvidence(_file: UploadFile, files: UploadFiles) {
+  applyFiles.value = files;
+  if (!files.length) applyEvidenceUrl.value = "";
+}
+async function reviewGrant(row: any, decision: string) {
+  const validity =
+    Number(row.itemValidity) > 0
+      ? `通过后有效期 ${row.itemValidity} 个月`
+      : "通过后长期有效";
+  const { value } = await ElMessageBox.prompt(
+    `申请人：${row.applicantName}｜项目：${row.itemName}｜${decision === "APPROVED" ? validity : "驳回后申请人可重新申请"}`,
+    decision === "APPROVED" ? "通过培训授权" : "驳回培训授权",
+    { inputType: "textarea", inputPlaceholder: "审批意见（可选）" },
+  );
+  await api.post(`/trainings/grants/${row.id}/review`, {
+    decision,
+    comment: value || "",
+  });
+  ElMessage.success(decision === "APPROVED" ? "授权已发放" : "申请已驳回");
+  await loadTraining();
+}
+async function revokeGrant(row: any) {
+  const { value } = await ElMessageBox.prompt(
+    `撤销后【${row.itemName}】的授权立即失效，用户需要重新申请。请填写撤销原因。`,
+    "撤销培训授权",
+    { inputType: "textarea", inputPlaceholder: "撤销原因" },
+  );
+  await api.post(`/trainings/grants/${row.id}/revoke`, { comment: value || "" });
+  ElMessage.success("授权已撤销");
+  await loadTraining();
+}
+async function openRequirements(row: any) {
+  requirementEquipment.value = row;
+  if (!trainingItems.value.length)
+    trainingItems.value = await api.get("/trainings/items");
+  const detail: any = await api.get(`/equipment/${row.id}`);
+  requirementIds.value = (detail.trainingRequirementIds || []).map(Number);
+  requirementDialog.value = true;
+}
+async function saveRequirements() {
+  await api.put(
+    `/equipment/${requirementEquipment.value.id}/training-requirements`,
+    { itemIds: requirementIds.value },
+  );
+  requirementDialog.value = false;
+  ElMessage.success("设备准入要求已更新");
+  await load();
+}
+async function loadReservationAccess(equipmentId: number | null) {
+  reservationAccess.value = null;
+  if (props.active !== "预约管理" || manager.value || !equipmentId) return;
+  reservationAccess.value = await api.get(`/trainings/access/${equipmentId}`);
+}
+function goTrainingFromReservation() {
+  dialog.value = false;
+  emit("navigate", "培训与授权");
+}
+function requirementNames(items: any[] | null | undefined) {
+  return (items || []).map((x: any) => x.name).join("、");
+}
 function statusType(status: string) {
   return (
     (
@@ -682,6 +887,7 @@ function columnMinWidth(name: string) {
   if (name === "status") return props.active === "预约管理" && admin.value ? 190 : 125;
   if (name === "purpose") return 110;
   if (name === "equipment_name") return 115;
+  if (name === "trainingRequirements") return 160;
   return 125;
 }
 function escapeHtml(value: string) {
@@ -733,10 +939,16 @@ function operationLabel(action: string) {
     RESERVATION_REVOKE_APPROVAL: "撤销通过",
     RESERVATION_REVOKE_AUTO_APPROVAL: "撤销自动通过",
     REPAIR_PROCESS: "处理维修工单",
+    TRAINING_ITEM_CREATE: "新增培训项目",
+    TRAINING_ITEM_UPDATE: "修改培训项目",
+    TRAINING_APPLY: "申请培训授权",
+    TRAINING_GRANT_REVIEW: "审批培训授权",
+    TRAINING_GRANT_REVOKE: "撤销培训授权",
+    EQUIPMENT_TRAINING_REQUIREMENTS: "维护设备准入要求",
   } as Record<string, string>)[action] || action || "—";
 }
 function targetTypeLabel(type: string) {
-  return ({ reservation: "预约", reservation_appeal: "履约申诉", equipment: "设备", repair_ticket: "维修工单", USER: "用户" } as Record<string, string>)[type] || type || "—";
+  return ({ reservation: "预约", reservation_appeal: "履约申诉", equipment: "设备", repair_ticket: "维修工单", USER: "用户", training_item: "培训项目", training_grant: "培训授权" } as Record<string, string>)[type] || type || "—";
 }
 const auditKeyLabels: Record<string, string> = {
   decision: "结果",
@@ -752,6 +964,9 @@ const auditKeyLabels: Record<string, string> = {
   note: "备注",
   username: "账号",
   reviewer: "操作人",
+  itemId: "培训项目",
+  count: "数量",
+  enabled: "启用",
 };
 function auditValueLabel(value: string) {
   return ({
@@ -769,6 +984,12 @@ function auditValueLabel(value: string) {
     PROCESSING: "处理中",
     WAIT_ACCEPTANCE: "待验收",
     COMPLETED: "已完成",
+    REVOKED: "已撤销",
+    SAFETY_TRAINING: "安全培训",
+    OPERATION_EXAM: "仪器操作考试",
+    TRAINING: "培训申请",
+    EXAM: "在线考试",
+    ADMIN: "管理员登记",
   } as Record<string, string>)[value] || value;
 }
 function formatAuditDetail(detail: any) {
@@ -1139,6 +1360,292 @@ onMounted(async () => {
         <div v-if="sysadmin" class="profile-note">系统管理员不能自行注销，以避免系统失去管理权限。</div>
       </div></template
     >
+    <template v-else-if="active === '培训与授权'">
+      <div class="page-heading">
+        <div>
+          <div class="eyebrow">TRAINING &amp; ACCESS</div>
+          <h1>培训与授权</h1>
+          <p>通过安全培训或仪器操作考试并获得授权后，才能预约需要准入的设备</p>
+        </div>
+        <div class="heading-actions">
+          <el-button @click="loadTraining">刷新</el-button>
+          <el-button v-if="admin" type="primary" @click="openTraining()"
+            >新增培训项目</el-button
+          >
+        </div>
+      </div>
+      <div class="notice-strip">
+        设备可以绑定多个培训项目，用户必须持有每个项目的有效授权才能预约；授权过期、被撤销或仍在待审批时都不能预约。授权审批通过后立即生效。
+      </div>
+      <div v-if="!manager" class="data-section">
+        <div class="section-title">
+          <div>
+            <h3>培训项目</h3>
+            <span>提交培训或考试报名，管理员确认通过后发放授权</span>
+          </div>
+        </div>
+        <el-table
+          v-loading="busy"
+          :data="trainingCatalog"
+          stripe
+          empty-text="暂无培训项目"
+        >
+          <el-table-column prop="name" label="项目" min-width="150" />
+          <el-table-column label="类型" width="130">
+            <template #default="s"
+              ><el-tag
+                size="small"
+                :type="s.row.type === 'OPERATION_EXAM' ? 'warning' : 'success'"
+                >{{ trainingTypeLabel(s.row.type) }}</el-tag
+              ></template
+            >
+          </el-table-column>
+          <el-table-column label="实验室" width="140">
+            <template #default="s">{{
+              s.row.laboratory || "校级通用"
+            }}</template>
+          </el-table-column>
+          <el-table-column label="有效期" width="100">
+            <template #default="s">{{
+              s.row.validityMonths ? `${s.row.validityMonths} 个月` : "长期"
+            }}</template>
+          </el-table-column>
+          <el-table-column
+            prop="description"
+            label="说明"
+            min-width="240"
+            show-overflow-tooltip
+          />
+          <el-table-column label="我的状态" width="120">
+            <template #default="s">
+              <el-tag v-if="Number(s.row.effective) === 1" type="success" size="small"
+                >已授权</el-tag
+              ><el-tag
+                v-else-if="s.row.grantStatus === 'PENDING'"
+                type="warning"
+                size="small"
+                >待审批</el-tag
+              ><el-tag
+                v-else-if="s.row.grantStatus === 'REJECTED'"
+                type="danger"
+                size="small"
+                >已驳回</el-tag
+              ><el-tag
+                v-else-if="s.row.grantStatus === 'REVOKED'"
+                type="info"
+                size="small"
+                >已撤销</el-tag
+              ><el-tag
+                v-else-if="s.row.grantStatus === 'APPROVED'"
+                type="info"
+                size="small"
+                >已过期</el-tag
+              ><span v-else>未申请</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="100">
+            <template #default="s"
+              ><el-button
+                v-if="
+                  !s.row.effective &&
+                  s.row.grantStatus !== 'PENDING' &&
+                  s.row.grantStatus !== 'REVOKED'
+                "
+                link
+                type="primary"
+                @click="applyTraining(s.row)"
+                >申请</el-button
+              ><el-button
+                v-else-if="s.row.grantStatus === 'REVOKED'"
+                link
+                type="primary"
+                @click="applyTraining(s.row)"
+                >重新申请</el-button
+              ><span v-else>—</span></template
+            >
+          </el-table-column>
+        </el-table>
+      </div>
+      <div v-if="!manager" class="data-section">
+        <div class="section-title">
+          <div>
+            <h3>我的授权</h3>
+            <span>预约时只认审批通过且仍在有效期内的授权</span>
+          </div>
+        </div>
+        <el-table :data="myGrants" stripe empty-text="暂无授权记录">
+          <el-table-column prop="itemName" label="培训项目" min-width="160" />
+          <el-table-column label="类型" width="130">
+            <template #default="s">{{
+              trainingTypeLabel(s.row.itemType)
+            }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="100">
+            <template #default="s"
+              ><el-tag size="small" :type="grantStateType(s.row)">{{
+                grantStateLabel(s.row)
+              }}</el-tag></template
+            >
+          </el-table-column>
+          <el-table-column label="来源" width="110">
+            <template #default="s">{{ grantSourceLabel(s.row.source) }}</template>
+          </el-table-column>
+          <el-table-column label="通过时间" width="150">
+            <template #default="s">{{
+              s.row.grantedAt ? formatDateTime(s.row.grantedAt) : "—"
+            }}</template>
+          </el-table-column>
+          <el-table-column label="有效期至" width="150">
+            <template #default="s">{{
+              s.row.expiresAt ? formatDateTime(s.row.expiresAt) : "长期有效"
+            }}</template>
+          </el-table-column>
+          <el-table-column label="审批意见" min-width="180">
+            <template #default="s">{{ s.row.reviewComment || "—" }}</template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <div v-if="manager" class="data-section">
+        <div class="section-title">
+          <div>
+            <h3>授权申请</h3>
+            <span
+              >{{
+                viewer
+                  ? "只读管理员可以查看，但不能审批"
+                  : "审批通过即发放授权，用户可立即预约相关设备"
+              }}</span
+            >
+          </div>
+          <el-select
+            v-model="grantFilter"
+            style="width: 130px"
+            @change="loadGrantRows"
+            ><el-option label="待审批" value="PENDING" /><el-option
+              label="全部记录"
+              value="ALL" /></el-select
+          >
+        </div>
+        <el-table :data="grantRows" stripe empty-text="暂无授权申请">
+          <el-table-column label="申请人" min-width="150">
+            <template #default="s"
+              >{{ s.row.applicantName }}（{{
+                s.row.identityNo || "未登记"
+              }}）</template
+            >
+          </el-table-column>
+          <el-table-column label="培训项目" min-width="170">
+            <template #default="s"
+              >{{ s.row.itemName }}<br /><small>{{
+                s.row.laboratory || "校级通用"
+              }}</small></template
+            >
+          </el-table-column>
+          <el-table-column label="来源" width="100">
+            <template #default="s">{{ grantSourceLabel(s.row.source) }}</template>
+          </el-table-column>
+          <el-table-column prop="remark" label="申请说明" min-width="180" />
+          <el-table-column label="证明材料" width="100">
+            <template #default="s"
+              ><a
+                v-if="s.row.evidenceUrl"
+                :href="s.row.evidenceUrl"
+                target="_blank"
+                rel="noreferrer"
+                >查看图片</a
+              ><span v-else>未上传</span></template
+            >
+          </el-table-column>
+          <el-table-column label="申请时间" width="150">
+            <template #default="s">{{
+              formatDateTime(s.row.appliedAt)
+            }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="100">
+            <template #default="s"
+              ><el-tag size="small" :type="grantStateType(s.row)">{{
+                grantStateLabel(s.row)
+              }}</el-tag></template
+            >
+          </el-table-column>
+          <el-table-column v-if="admin" label="操作" width="130" fixed="right">
+            <template #default="s"
+              ><el-button
+                v-if="s.row.status === 'PENDING'"
+                link
+                type="success"
+                @click="reviewGrant(s.row, 'APPROVED')"
+                >通过</el-button
+              ><el-button
+                v-if="s.row.status === 'PENDING'"
+                link
+                type="danger"
+                @click="reviewGrant(s.row, 'REJECTED')"
+                >驳回</el-button
+              ><el-button
+                v-if="
+                  s.row.status === 'APPROVED' && Number(s.row.effective) === 1
+                "
+                link
+                type="warning"
+                @click="revokeGrant(s.row)"
+                >撤销</el-button
+              ></template
+            >
+          </el-table-column>
+        </el-table>
+      </div>
+      <div v-if="manager" class="data-section">
+        <div class="section-title">
+          <div>
+            <h3>培训项目</h3>
+            <span>有效期从审批通过时开始计算；停用项目不再参与设备准入校验</span>
+          </div>
+        </div>
+        <el-table :data="trainingItems" stripe empty-text="暂无培训项目">
+          <el-table-column prop="code" label="编号" width="100" />
+          <el-table-column prop="name" label="项目名称" min-width="160" />
+          <el-table-column label="类型" width="130">
+            <template #default="s">{{
+              trainingTypeLabel(s.row.type)
+            }}</template>
+          </el-table-column>
+          <el-table-column label="实验室" width="140">
+            <template #default="s">{{
+              s.row.laboratory || "校级通用"
+            }}</template>
+          </el-table-column>
+          <el-table-column label="有效期" width="100">
+            <template #default="s">{{
+              s.row.validityMonths ? `${s.row.validityMonths} 个月` : "长期"
+            }}</template>
+          </el-table-column>
+          <el-table-column label="启用" width="80">
+            <template #default="s"
+              ><el-tag size="small" :type="s.row.enabled ? 'success' : 'info'">{{
+                s.row.enabled ? "启用" : "停用"
+              }}</el-tag></template
+            >
+          </el-table-column>
+          <el-table-column v-if="admin" label="操作" width="90" fixed="right">
+            <template #default="s"
+              ><el-button
+                v-if="sysadmin || s.row.labId"
+                link
+                type="primary"
+                @click="openTraining(s.row)"
+                >编辑</el-button
+              ><el-tooltip
+                v-else
+                content="校级培训项目只能由系统管理员维护"
+                placement="top"
+                ><span><el-button link disabled>编辑</el-button></span></el-tooltip
+              ></template
+            >
+          </el-table-column>
+        </el-table>
+      </div>
+    </template>
     <template v-else-if="active === '履约申诉'">
       <div class="page-heading">
         <div>
@@ -1321,6 +1828,9 @@ onMounted(async () => {
               ><span v-else-if="column[0] === 'enabled'">{{
                 scope.row[column[0]] ? "是" : "否"
               }}</span
+              ><span v-else-if="column[0] === 'trainingRequirements'">{{
+                scope.row.trainingRequirements || "无限制"
+              }}</span
               ><span v-else>{{
                 displayValue(scope.row, column[0])
               }}</span></template
@@ -1358,7 +1868,7 @@ onMounted(async () => {
             v-if="active !== '操作审计'"
             label="操作"
             fixed="right"
-            width="220"
+            :width="active === '设备档案' && admin ? 320 : 220"
             ><template #default="scope"
               ><template v-if="active === '预约管理'"
                 ><el-button
@@ -1438,6 +1948,17 @@ onMounted(async () => {
                 type="primary"
                 @click="markRead(scope.row)"
                 >标为已读</el-button
+              ><el-button
+                v-if="
+                  active === '设备档案' &&
+                  admin &&
+                  (sysadmin ||
+                    manageableLabIds.includes(Number(scope.row.labId)))
+                "
+                link
+                type="primary"
+                @click="openRequirements(scope.row)"
+                >准入要求</el-button
               ><el-button
                 v-if="
                   (active === '设备档案' &&
@@ -1538,12 +2059,19 @@ onMounted(async () => {
                 value="DISABLED" /></el-select></el-form-item></template
         ><template v-else-if="active === '预约管理'"
           ><el-form-item label="设备" required
-            ><el-select v-model="form.equipmentId" placeholder="请选择设备"
+            ><el-select
+              v-model="form.equipmentId"
+              placeholder="请选择设备"
+              @change="loadReservationAccess"
               ><el-option
                 v-for="x in equipment"
                 :key="x.id"
                 :value="x.id"
-                :label="x.name" /></el-select></el-form-item
+                :label="
+                  x.trainingRequirementCount
+                    ? `${x.name}（需准入）`
+                    : x.name
+                " /></el-select></el-form-item
           ><el-form-item :label="`开始时间（${currentTimeZone}）`" required
             ><el-date-picker
               v-model="form.startsAt"
@@ -1565,9 +2093,35 @@ onMounted(async () => {
           ><el-form-item label="使用目的" required
             ><el-input v-model="form.purpose" /></el-form-item
           ><el-form-item label="参与人数"
-            ><el-input-number
-              v-model="form.participants"
-              :min="1" /></el-form-item></template
+            ><el-input-number v-model="form.participants" :min="1" /></el-form-item
+          ><div v-if="reservationAccess" class="reservation-access">
+            <el-alert
+              :closable="false"
+              show-icon
+              :type="
+                reservationAccess.missing?.length ? 'warning' : 'success'
+              "
+              :title="
+                reservationAccess.missing?.length
+                  ? '缺少设备准入授权'
+                  : '准入授权已满足'
+              "
+              :description="
+                reservationAccess.missing?.length
+                  ? `请先完成：${requirementNames(reservationAccess.missing)}`
+                  : reservationAccess.required?.length
+                    ? '已具备该设备要求的全部培训授权'
+                    : '该设备没有设置培训准入要求'
+              "
+            />
+            <el-button
+              v-if="reservationAccess.missing?.length"
+              link
+              type="primary"
+              @click="goTrainingFromReservation"
+              >前往培训与授权</el-button
+            >
+          </div></template
         ><template v-else-if="active === '报修工单'"
           ><el-form-item label="设备" required
             ><el-select v-model="form.equipmentId" placeholder="请选择设备"
@@ -1829,6 +2383,146 @@ onMounted(async () => {
       ></el-dialog
     >
     <el-dialog
+      v-model="trainingDialog"
+      :title="trainingEditId ? '编辑培训项目' : '新增培训项目'"
+      width="560px"
+    >
+      <el-form label-position="top">
+        <el-form-item label="项目编号" required
+          ><el-input v-model="trainingForm.code" placeholder="例如 TR-005"
+        /></el-form-item>
+        <el-form-item label="项目名称" required
+          ><el-input v-model="trainingForm.name"
+        /></el-form-item>
+        <el-form-item label="类型" required>
+          <el-select v-model="trainingForm.type">
+            <el-option label="安全培训" value="SAFETY_TRAINING" />
+            <el-option label="仪器操作考试" value="OPERATION_EXAM" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="所属实验室">
+          <el-select
+            v-model="trainingForm.labId"
+            clearable
+            :disabled="!sysadmin"
+            placeholder="留空表示校级通用"
+          >
+            <el-option
+              v-for="x in editableLabs"
+              :key="x.id"
+              :label="x.name"
+              :value="x.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="有效期（月）">
+          <el-input-number
+            v-model="trainingForm.validityMonths"
+            :min="0"
+            :max="120"
+          />
+        </el-form-item>
+        <el-form-item label="说明">
+          <el-input
+            v-model="trainingForm.description"
+            type="textarea"
+            :rows="3"
+            maxlength="1000"
+            show-word-limit
+          />
+        </el-form-item>
+        <el-form-item label="启用">
+          <el-switch v-model="trainingForm.enabled" />
+        </el-form-item>
+        <div class="upload-tip">
+          校级通用项目只有系统管理员能维护；实验室管理员只能维护本实验室项目。有效期填
+          0 表示长期有效，停用后该项目不再参与设备准入校验。
+        </div>
+      </el-form>
+      <template #footer
+        ><el-button @click="trainingDialog = false">取消</el-button
+        ><el-button type="primary" @click="saveTraining">保存</el-button></template
+      >
+    </el-dialog>
+
+    <el-dialog v-model="applyDialog" title="申请培训授权" width="520px">
+      <el-form label-position="top">
+        <el-form-item label="培训项目">
+          <el-input :model-value="applyItem?.name" disabled />
+        </el-form-item>
+        <el-form-item label="申请说明" required>
+          <el-input
+            v-model="applyRemark"
+            type="textarea"
+            :rows="4"
+            maxlength="500"
+            show-word-limit
+            placeholder="说明已完成线下培训、培训时间或考试安排"
+          />
+        </el-form-item>
+        <el-form-item label="培训证明（可选）">
+          <el-upload
+            v-model:file-list="applyFiles"
+            list-type="picture-card"
+            accept="image/jpeg,image/png,image/webp,image/gif"
+            :limit="1"
+            :http-request="uploadTrainingEvidence"
+            :on-remove="removeTrainingEvidence"
+          >
+            <span>上传图片</span>
+            <template #tip
+              ><div class="upload-tip">
+                支持 JPG、PNG、WEBP、GIF，最大 5MB
+              </div></template
+            >
+          </el-upload>
+        </el-form-item>
+        <div class="upload-tip">
+          提交后由实验室管理员或系统管理员审批；通过后授权在有效期内对所有要求该项目的设备生效。
+        </div>
+      </el-form>
+      <template #footer
+        ><el-button @click="applyDialog = false">取消</el-button
+        ><el-button type="primary" @click="submitTrainingApply"
+          >提交申请</el-button
+        ></template
+      >
+    </el-dialog>
+
+    <el-dialog v-model="requirementDialog" title="设备准入要求" width="560px">
+      <el-form label-position="top">
+        <el-form-item
+          :label="`设备：${requirementEquipment?.code || ''} ${requirementEquipment?.name || ''}`"
+        >
+          <el-select
+            v-model="requirementIds"
+            multiple
+            filterable
+            placeholder="选择必须通过的培训项目"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="x in trainingItems"
+              :key="x.id"
+              :disabled="!x.enabled"
+              :label="`${x.name}${x.enabled ? '' : '（已停用）'}`"
+              :value="x.id"
+            />
+          </el-select>
+        </el-form-item>
+        <div class="upload-tip">
+          选中项目后，用户必须持有其中每一项的有效授权才能预约该设备；清空表示不限制。
+        </div>
+      </el-form>
+      <template #footer
+        ><el-button @click="requirementDialog = false">取消</el-button
+        ><el-button type="primary" @click="saveRequirements"
+          >保存</el-button
+        ></template
+      >
+    </el-dialog>
+
+    <el-dialog
       v-model="detailDialog"
       :title="
         detail.contacts
@@ -1879,6 +2573,9 @@ onMounted(async () => {
           }}</el-descriptions-item
           ><el-descriptions-item label="购置日期">{{
             detail.purchase_date || "—"
+          }}</el-descriptions-item
+          ><el-descriptions-item label="准入要求" :span="2">{{
+            requirementNames(detail.trainingRequirements) || "无限制"
           }}</el-descriptions-item
           ><el-descriptions-item label="使用规则" :span="2">{{
             detail.usage_rules || "—"

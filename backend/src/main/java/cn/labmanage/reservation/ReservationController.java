@@ -13,12 +13,13 @@ import java.math.BigDecimal;
 import java.util.Locale;
 import java.util.Map;
 import cn.labmanage.security.AccessService;
+import cn.labmanage.training.TrainingAccessService;
 
 @RestController @RequestMapping("/api/reservations")
 public class ReservationController {
     private static final ZoneId LABORATORY_ZONE = ZoneId.of("Asia/Shanghai");
-    private final JdbcTemplate db; private final AccessService access; private final ReservationWorkflowService workflow;
-    public ReservationController(JdbcTemplate db, AccessService access, ReservationWorkflowService workflow) { this.db=db; this.access=access; this.workflow=workflow; }
+    private final JdbcTemplate db; private final AccessService access; private final ReservationWorkflowService workflow; private final TrainingAccessService training;
+    public ReservationController(JdbcTemplate db, AccessService access, ReservationWorkflowService workflow, TrainingAccessService training) { this.db=db; this.access=access; this.workflow=workflow; this.training=training; }
     public record Booking(@NotNull Long equipmentId,@NotNull LocalDateTime startsAt,@NotNull LocalDateTime endsAt,@NotBlank String purpose,@Min(1) int participants) {}
     private Long userId(String name) { return db.queryForObject("SELECT id FROM lab_user WHERE username=?",Long.class,name); }
     private void refreshCredit(Long uid) {
@@ -52,6 +53,7 @@ public class ReservationController {
         BigDecimal credit=db.queryForObject("SELECT credit_score FROM lab_user WHERE id=?",BigDecimal.class,uid);
         if (credit != null && credit.compareTo(BigDecimal.valueOf(60)) < 0) throw new BusinessException("信誉积分过低，请联系管理员");
         validateAndCheck(b,null,true);
+        training.requireEquipmentAccess(uid,b.equipmentId());
         var rule=autoRule(b.equipmentId());
         boolean creditAuto=credit != null && credit.compareTo(BigDecimal.valueOf(90)) >= 0;
         boolean ruleActive=!rule.isEmpty();
@@ -81,7 +83,7 @@ public class ReservationController {
         access.requireEquipment(auth,((Number)r.get("equipment_id")).longValue());
         if(!"PENDING".equals(r.get("status"))) throw new BusinessException("只有待审批预约可以审核"); String decision=body.get("decision");
         if(!"APPROVED".equals(decision)&&!"REJECTED".equals(decision)) throw new BusinessException("审核结果不合法");
-        if("APPROVED".equals(decision)) { Booking b=new Booking(((Number)r.get("equipment_id")).longValue(),DateTimeValues.toLocalDateTime(r.get("starts_at")),DateTimeValues.toLocalDateTime(r.get("ends_at")),(String)r.get("purpose"),((Number)r.get("participants")).intValue()); db.queryForObject("SELECT id FROM equipment WHERE id=? FOR UPDATE",Long.class,b.equipmentId()); validateAndCheck(b,id,false); }
+        if("APPROVED".equals(decision)) { Booking b=new Booking(((Number)r.get("equipment_id")).longValue(),DateTimeValues.toLocalDateTime(r.get("starts_at")),DateTimeValues.toLocalDateTime(r.get("ends_at")),(String)r.get("purpose"),((Number)r.get("participants")).intValue()); db.queryForObject("SELECT id FROM equipment WHERE id=? FOR UPDATE",Long.class,b.equipmentId()); validateAndCheck(b,id,false); training.requireEquipmentAccess(((Number)r.get("user_id")).longValue(),b.equipmentId()); }
         Long reviewer=userId(auth.getName()); String comment=body.getOrDefault("comment",""); db.update("UPDATE reservation SET status=?,reject_reason=?,reviewer_id=?,review_comment=? WHERE id=?",decision,"REJECTED".equals(decision)?"ADMIN_REJECTED":null,reviewer,comment,id); db.update("INSERT INTO reservation_review(reservation_id,reviewer_id,decision,comment) VALUES(?,?,?,?)",id,reviewer,decision,comment);
         db.update("INSERT INTO notification(user_id,title,content) SELECT r.user_id,'预约审核结果',CONCAT('设备【',e.code,' ',e.name,'】（',l.name,'）的预约已',?,'。使用时间：',DATE_FORMAT(CONVERT_TZ(r.starts_at,'+00:00','+08:00'),'%Y年%m月%d日 %H:%i'),' 至 ',DATE_FORMAT(CONVERT_TZ(r.ends_at,'+00:00','+08:00'),'%H:%i'),'；用途：',r.purpose,IF(?<>'','；审核意见：',''),?) FROM reservation r JOIN equipment e ON e.id=r.equipment_id JOIN laboratory l ON l.id=e.lab_id WHERE r.id=?", "APPROVED".equals(decision)?"通过":"驳回",comment,comment,id); db.update("INSERT INTO operation_log(operator_id,action,target_type,target_id,detail) VALUES(?,'RESERVATION_REVIEW','reservation',?,JSON_OBJECT('decision',?,'comment',?))",reviewer,id,decision,comment); return ApiResult.ok(Map.of("status",decision));
     }

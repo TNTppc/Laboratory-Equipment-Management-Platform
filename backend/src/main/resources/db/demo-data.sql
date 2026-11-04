@@ -44,3 +44,9 @@ INSERT INTO equipment(code,name,category_id,lab_id,brand_model,location,owner_id
 SELECT 'EQ-012','便携式数据采集仪',c.id,l.id,'NI USB-6343','B305-08',u.id,'多功能USB数据采集设备','接线时断开被测系统电源，严禁输入过压','2023-06-30','AVAILABLE'
 FROM equipment_category c JOIN laboratory l ON l.name='电子信息实验室' LEFT JOIN lab_user u ON u.username='labadmin'
 WHERE c.name='测量仪器' AND NOT EXISTS(SELECT 1 FROM equipment WHERE code='EQ-012');
+
+INSERT IGNORE INTO equipment_training_requirement(equipment_id,training_item_id)
+SELECT e.id,ti.id FROM equipment e JOIN training_item ti ON ti.code IN ('TR-001','TR-002') WHERE e.code='EQ-008';
+
+INSERT IGNORE INTO equipment_training_requirement(equipment_id,training_item_id)
+SELECT e.id,ti.id FROM equipment e JOIN training_item ti ON ti.code IN ('TR-001','TR-003') WHERE e.code='EQ-010';

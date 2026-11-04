@@ -3,16 +3,19 @@ package cn.labmanage;
 import cn.labmanage.reservation.ReservationController;
 import cn.labmanage.reservation.ReservationWorkflowService;
 import cn.labmanage.security.AccessService;
+import cn.labmanage.training.TrainingAccessService;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.core.Authentication;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
@@ -24,7 +27,7 @@ class ReservationControllerTest {
     }
 
     private static ReservationController controller(JdbcTemplate db) {
-        return new ReservationController(db, mock(AccessService.class), mock(ReservationWorkflowService.class));
+        return new ReservationController(db, mock(AccessService.class), mock(ReservationWorkflowService.class), mock(TrainingAccessService.class));
     }
 
     private static JdbcTemplate reservation(JdbcTemplate db, long id, long userId, String status, LocalDateTime startsAt) {
@@ -102,7 +105,7 @@ class ReservationControllerTest {
                 "starts_at", LocalDateTime.now(ZoneOffset.UTC).plusHours(1),
                 "ends_at", LocalDateTime.now(ZoneOffset.UTC).plusHours(2))));
 
-        ReservationController controller = new ReservationController(db, access, mock(ReservationWorkflowService.class));
+        ReservationController controller = new ReservationController(db, access, mock(ReservationWorkflowService.class), mock(TrainingAccessService.class));
 
         org.junit.jupiter.api.Assertions.assertThrows(cn.labmanage.common.BusinessException.class,
             () -> controller.revokeApproval(9L, auth("labadmin")));
@@ -119,11 +122,50 @@ class ReservationControllerTest {
                 "starts_at", LocalDateTime.now(ZoneOffset.UTC).plusHours(5),
                 "ends_at", LocalDateTime.now(ZoneOffset.UTC).plusHours(6))));
 
-        ReservationController controller = new ReservationController(db, access, mock(ReservationWorkflowService.class));
+        ReservationController controller = new ReservationController(db, access, mock(ReservationWorkflowService.class), mock(TrainingAccessService.class));
 
         controller.revokeApproval(9L, auth("labadmin"));
 
         verify(db).update(contains("UPDATE reservation SET status='PENDING',auto_credit_approved=FALSE"), eq(9L));
         verify(db).update(contains("预约已被撤销通过"), eq(9L));
+    }
+
+    @Test
+    void creatingReservationWithoutTrainingGrantIsRejectedBeforeInsert() {
+        JdbcTemplate db = mock(JdbcTemplate.class);
+        TrainingAccessService training = mock(TrainingAccessService.class);
+        when(db.queryForObject("SELECT id FROM equipment WHERE id=? FOR UPDATE", Long.class, 4L)).thenReturn(4L);
+        when(db.queryForObject(contains("SELECT id FROM lab_user"), eq(Long.class), eq("student"))).thenReturn(2L);
+        when(db.queryForObject(contains("SELECT credit_score"), eq(BigDecimal.class), eq(2L))).thenReturn(BigDecimal.valueOf(100));
+        when(db.queryForList(contains("SELECT e.status,l.open_time,l.close_time"), eq(4L))).thenReturn(List.of(Map.of(
+            "status", "AVAILABLE", "open_time", java.sql.Time.valueOf("08:00:00"), "close_time", java.sql.Time.valueOf("22:00:00"))));
+        when(db.queryForObject(contains("SELECT COUNT(*) FROM reservation"), eq(Integer.class), any(), any(), any(), any(), any())).thenReturn(0);
+        doThrow(new cn.labmanage.common.BusinessException("缺少设备准入授权：协作机器人操作考试")).when(training).requireEquipmentAccess(2L, 4L);
+        ReservationController controller = new ReservationController(db, mock(AccessService.class), mock(ReservationWorkflowService.class), training);
+
+        LocalDateTime start = LocalDateTime.now(ZoneOffset.UTC).plusDays(2).withHour(1).withMinute(0).withSecond(0).withNano(0);
+        ReservationController.Booking booking = new ReservationController.Booking(4L, start, start.plusHours(2), "测试", 1);
+
+        assertThrows(cn.labmanage.common.BusinessException.class, () -> controller.create(booking, auth("student")));
+        verify(db, never()).update(startsWith("INSERT INTO reservation("), (Object[]) any());
+    }
+
+    @Test
+    void approvingReservationWithoutTrainingGrantIsRejected() {
+        JdbcTemplate db = mock(JdbcTemplate.class);
+        TrainingAccessService training = mock(TrainingAccessService.class);
+        LocalDateTime start = LocalDateTime.now(ZoneOffset.UTC).plusDays(2).withHour(1).withMinute(0).withSecond(0).withNano(0);
+        when(db.queryForList("SELECT * FROM reservation WHERE id=? FOR UPDATE", 9L)).thenReturn(List.of(Map.of(
+            "equipment_id", 4L, "user_id", 2L, "status", "PENDING", "purpose", "测试", "participants", 1,
+            "starts_at", start, "ends_at", start.plusHours(2))));
+        when(db.queryForObject("SELECT id FROM equipment WHERE id=? FOR UPDATE", Long.class, 4L)).thenReturn(4L);
+        when(db.queryForList(contains("SELECT e.status,l.open_time,l.close_time"), eq(4L))).thenReturn(List.of(Map.of(
+            "status", "AVAILABLE", "open_time", java.sql.Time.valueOf("08:00:00"), "close_time", java.sql.Time.valueOf("22:00:00"))));
+        when(db.queryForObject(contains("SELECT COUNT(*) FROM reservation"), eq(Integer.class), any(), any(), any(), any(), any())).thenReturn(0);
+        doThrow(new cn.labmanage.common.BusinessException("缺少设备准入授权：协作机器人操作考试")).when(training).requireEquipmentAccess(2L, 4L);
+        ReservationController controller = new ReservationController(db, mock(AccessService.class), mock(ReservationWorkflowService.class), training);
+
+        assertThrows(cn.labmanage.common.BusinessException.class, () -> controller.review(9L, Map.of("decision", "APPROVED"), auth("labadmin")));
+        verify(db, never()).update(startsWith("UPDATE reservation SET status=?"), (Object[]) any());
     }
 }

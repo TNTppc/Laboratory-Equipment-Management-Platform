@@ -1,5 +1,7 @@
 package cn.labmanage.common;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.FieldError;
@@ -12,6 +14,8 @@ import org.springframework.web.multipart.MaxUploadSizeExceededException;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+    private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
     @ExceptionHandler(BusinessException.class)
     ResponseEntity<ApiResult<Void>> business(BusinessException e) { return ResponseEntity.badRequest().body(ApiResult.error(e.getMessage())); }
     @ExceptionHandler(MethodArgumentNotValidException.class)
@@ -26,5 +30,5 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(MaxUploadSizeExceededException.class)
     ResponseEntity<ApiResult<Void>> uploadTooLarge(MaxUploadSizeExceededException e) { return ResponseEntity.badRequest().body(ApiResult.error("图片不能超过 5MB")); }
     @ExceptionHandler(Exception.class)
-    ResponseEntity<ApiResult<Void>> unexpected(Exception e) { return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ApiResult.error("服务器处理失败")); }
+    ResponseEntity<ApiResult<Void>> unexpected(Exception e) { log.error("服务器处理请求失败", e); return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ApiResult.error("服务器处理失败")); }
 }

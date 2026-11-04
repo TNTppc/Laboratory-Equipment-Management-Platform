@@ -28,7 +28,7 @@ public class RepairUploadController {
         this.uploadDirectory = Path.of(uploadDirectory).toAbsolutePath().normalize();
     }
 
-    @PostMapping(value = "/repair-image", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @PostMapping(value = {"/repair-image", "/training-evidence"}, consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ApiResult<?> upload(@RequestParam("file") MultipartFile file) {
         if (file.isEmpty()) throw new BusinessException("请选择图片文件");
         String contentType = file.getContentType() == null ? "" : file.getContentType().toLowerCase(Locale.ROOT);
